@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+
+# Runtime output
+market_snapshot.json
+collection_journal.jsonl
+
+# uv lock (optional — include if you want reproducible installs)
+# uv.lock

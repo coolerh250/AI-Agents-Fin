@@ -1,0 +1,20 @@
+[project]
+name = "ai-agent-studio"
+version = "0.1.0"
+description = "Enterprise AI Agent Studio"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "httpx>=0.28.1",
+    "langchain-anthropic>=1.4.3",
+    "langgraph>=1.2.0",
+    "loguru>=0.7.3",
+    "lxml>=6.1.0",
+    "mcp>=1.27.1",
+    "pandas>=3.0.3",
+    "psutil>=7.2.2",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "yfinance>=1.3.0",
+]
