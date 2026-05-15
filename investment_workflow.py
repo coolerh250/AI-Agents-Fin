@@ -66,7 +66,17 @@ def build_graph():
     graph.add_edge("save_to_db",           "send_notification")
     graph.add_edge("send_notification",    END)
 
-    return graph.compile()
+    # Phase 4: checkpointer — enables resume-on-failure
+    # Prefers SqliteSaver (persistent); falls back to MemorySaver (in-process)
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        checkpointer = SqliteSaver.from_conn_string("./checkpoints.db")
+        logger.debug("[build_graph] Using SqliteSaver checkpointer")
+    except ImportError:
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
+        logger.debug("[build_graph] langgraph-checkpoint-sqlite not installed — using MemorySaver")
+    return graph.compile(checkpointer=checkpointer)
 
 
 def _print_cost_report(run_id: str) -> float:
@@ -277,8 +287,9 @@ def main():
     )
 
     logger.info("Invoking LangGraph workflow...")
+    _graph_config = {"configurable": {"thread_id": run_id}}
     try:
-        result = graph.invoke(initial_state)
+        result = graph.invoke(initial_state, config=_graph_config)
         finish_workflow_run(run_id, "success")
     except Exception as exc:
         finish_workflow_run(run_id, "failed", str(exc))

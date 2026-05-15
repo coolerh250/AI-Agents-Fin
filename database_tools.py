@@ -469,6 +469,9 @@ def ensure_observability_tables() -> None:
             )
         """))
 
+    ensure_tool_audit_log_table()   # Phase 2
+    ensure_session_episodes_table() # Phase 4
+
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
         ("ALTER TABLE cost_logs ADD COLUMN thinking_tokens INT NOT NULL DEFAULT 0", "add thinking_tokens"),
@@ -708,3 +711,240 @@ def get_per_run_cost_summary(days: int = 30) -> list[dict]:
     with _engine().connect() as conn:
         rows = conn.execute(text(sql), {"days": days}).fetchall()
     return [dict(r._mapping) for r in rows]
+
+
+# ── Phase 2: Tool audit log ────────────────────────────────────────────────────
+
+def ensure_tool_audit_log_table() -> None:
+    """Create tool_audit_log table. Called by ensure_observability_tables()."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS tool_audit_log (
+                    id            BIGINT       AUTO_INCREMENT PRIMARY KEY,
+                    tool_id       VARCHAR(100) NOT NULL,
+                    tool_type     VARCHAR(20)  NOT NULL DEFAULT 'direct',
+                    caller        VARCHAR(50)  NULL,
+                    run_id        VARCHAR(36)  NULL,
+                    status        VARCHAR(20)  NOT NULL DEFAULT 'ok',
+                    latency_ms    INT          NULL,
+                    error_message TEXT         NULL,
+                    detail        JSON         NULL,
+                    created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_tal_tool    (tool_id),
+                    INDEX idx_tal_run     (run_id),
+                    INDEX idx_tal_created (created_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_tool_audit_log_table failed: {exc}")
+
+
+def log_tool_call(
+    tool_id: str,
+    tool_type: str = "direct",
+    caller: Optional[str] = None,
+    run_id: Optional[str] = None,
+    status: str = "ok",
+    latency_ms: Optional[int] = None,
+    error_message: Optional[str] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    """Record one tool invocation in tool_audit_log. Fails silently."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO tool_audit_log
+                        (tool_id, tool_type, caller, run_id, status, latency_ms,
+                         error_message, detail)
+                    VALUES (:tool_id, :ttype, :caller, :run_id, :status,
+                            :lat, :err, :detail)
+                """),
+                {"tool_id": tool_id, "ttype": tool_type, "caller": caller,
+                 "run_id": run_id, "status": status, "lat": latency_ms,
+                 "err": (error_message or "")[:500] if error_message else None,
+                 "detail": _json.dumps(detail or {}, ensure_ascii=False)},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] log_tool_call failed: {exc}")
+
+
+# Callers allowed per high-risk tool. Fail-open: logs violation, never blocks.
+_TOOL_PERMISSION_RULES: dict[str, list[str]] = {
+    "save_brief":          ["save_to_db"],
+    "add_portfolio_item":  ["dashboard", "line_webhook"],
+    "delete_portfolio_item": ["dashboard", "line_webhook"],
+    "update_portfolio_item": ["dashboard", "line_webhook"],
+    "send_line":           ["send_notification", "alert_runner", "investment_workflow"],
+    "send_telegram":       ["send_notification", "alert_runner", "investment_workflow"],
+}
+
+
+def validate_tool_permission(tool_id: str, caller: str) -> bool:
+    """Return True if caller is allowed. Log violation but never block (fail-open)."""
+    allowed = _TOOL_PERMISSION_RULES.get(tool_id)
+    if allowed is None:
+        return True
+    if caller in allowed:
+        return True
+    logger.warning(f"[tool_permission] {caller!r} called {tool_id!r} — not in allowed list {allowed}")
+    return False  # caller can decide whether to honour; production is fail-open
+
+
+# ── Phase 3: Context engineering helpers ──────────────────────────────────────
+
+def get_recent_accuracy_context(days: int = 14) -> str:
+    """
+    Return last N days of brief predictions vs actuals as a compact context string.
+    Injected into chief_strategist_node user prompt.
+    Returns "" when no matched data exists (no join rows yet).
+    """
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT b.trade_date,
+                           b.gap_direction,
+                           b.predicted_gap_pct,
+                           a.actual_gap_pct,
+                           CASE
+                             WHEN (b.gap_direction = 'up'   AND a.actual_gap_pct >  0.3)
+                               OR (b.gap_direction = 'down' AND a.actual_gap_pct < -0.3)
+                               OR (b.gap_direction = 'flat' AND ABS(a.actual_gap_pct) <= 0.3)
+                             THEN 1 ELSE 0
+                           END AS correct
+                    FROM daily_briefs b
+                    JOIN market_actuals a ON b.trade_date = a.trade_date
+                    WHERE b.trade_date >= CURDATE() - INTERVAL :days DAY
+                    ORDER BY b.trade_date DESC
+                    LIMIT 10
+                """),
+                {"days": days},
+            ).fetchall()
+    except Exception as exc:
+        logger.warning(f"[context] get_recent_accuracy_context failed: {exc}")
+        return ""
+
+    if not rows:
+        return ""
+
+    correct_count = sum(int(r[4]) for r in rows)
+    accuracy_pct  = correct_count / len(rows) * 100
+
+    lines = [f"【近期預測準確率 {accuracy_pct:.0f}% ({correct_count}/{len(rows)}筆)】"]
+    for r in rows:
+        label = "✓" if int(r[4]) else "✗"
+        pred_gap  = float(r[2]) if r[2] is not None else 0.0
+        actual_gap = float(r[3]) if r[3] is not None else 0.0
+        lines.append(
+            f"  {r[0]} {label} 預測 {r[1]}({pred_gap:+.1f}%) → 實際 {actual_gap:+.1f}%"
+        )
+    return "\n".join(lines)
+
+
+# ── Phase 4: Session episodes ──────────────────────────────────────────────────
+
+def ensure_session_episodes_table() -> None:
+    """Create session_episodes table. Called by ensure_observability_tables()."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS session_episodes (
+                    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    run_id              VARCHAR(36)   NOT NULL,
+                    trade_date          DATE          NOT NULL,
+                    brief_id            BIGINT        NULL,
+                    predicted_direction VARCHAR(10)   NULL,
+                    predicted_gap_pct   DECIMAL(6,3)  NULL,
+                    actual_direction    VARCHAR(10)   NULL,
+                    actual_gap_pct      DECIMAL(6,3)  NULL,
+                    direction_correct   TINYINT       NULL,
+                    foreign_oi_net      INT           NULL,
+                    trust_oi_net        INT           NULL,
+                    dealer_oi_net       INT           NULL,
+                    djia_chg_pct        DECIMAL(6,3)  NULL,
+                    ndx_chg_pct         DECIMAL(6,3)  NULL,
+                    sox_chg_pct         DECIMAL(6,3)  NULL,
+                    tsm_adr_chg_pct     DECIMAL(6,3)  NULL,
+                    divergence_signal   TINYINT       NULL,
+                    regime_sox          VARCHAR(10)   NULL,
+                    regime_foreign_oi   VARCHAR(10)   NULL,
+                    workflow_cost_usd   DECIMAL(10,6) NULL,
+                    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_se_trade_date (trade_date),
+                    INDEX idx_se_run     (run_id),
+                    INDEX idx_se_created (created_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_session_episodes_table failed: {exc}")
+
+
+def log_session_episode(
+    run_id: str,
+    trade_date: date,
+    brief_id: Optional[int] = None,
+    predicted_direction: Optional[str] = None,
+    predicted_gap_pct: Optional[float] = None,
+    foreign_oi_net: Optional[int] = None,
+    trust_oi_net: Optional[int] = None,
+    dealer_oi_net: Optional[int] = None,
+    djia_chg_pct: Optional[float] = None,
+    ndx_chg_pct: Optional[float] = None,
+    sox_chg_pct: Optional[float] = None,
+    tsm_adr_chg_pct: Optional[float] = None,
+    divergence_signal: Optional[bool] = None,
+    workflow_cost_usd: Optional[float] = None,
+) -> None:
+    """Upsert one session episode. actual_* fields backfilled later by backtest_agent."""
+    regime_sox = (
+        "strong" if (sox_chg_pct or 0) > 1.0 else
+        "weak"   if (sox_chg_pct or 0) < -1.0 else "neutral"
+    )
+    regime_foreign_oi = (
+        "bearish" if (foreign_oi_net or 0) < -10000 else
+        "bullish" if (foreign_oi_net or 0) > 0 else "neutral"
+    )
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO session_episodes
+                        (run_id, trade_date, brief_id, predicted_direction, predicted_gap_pct,
+                         foreign_oi_net, trust_oi_net, dealer_oi_net,
+                         djia_chg_pct, ndx_chg_pct, sox_chg_pct, tsm_adr_chg_pct,
+                         divergence_signal, regime_sox, regime_foreign_oi, workflow_cost_usd)
+                    VALUES
+                        (:run_id, :td, :brief_id, :pred_dir, :pred_gap,
+                         :foreign, :trust, :dealer,
+                         :djia, :ndx, :sox, :tsm,
+                         :div, :regime_sox, :regime_foi, :cost)
+                    ON DUPLICATE KEY UPDATE
+                        run_id              = VALUES(run_id),
+                        brief_id            = VALUES(brief_id),
+                        predicted_direction = VALUES(predicted_direction),
+                        predicted_gap_pct   = VALUES(predicted_gap_pct),
+                        foreign_oi_net      = VALUES(foreign_oi_net),
+                        trust_oi_net        = VALUES(trust_oi_net),
+                        dealer_oi_net       = VALUES(dealer_oi_net),
+                        djia_chg_pct        = VALUES(djia_chg_pct),
+                        ndx_chg_pct         = VALUES(ndx_chg_pct),
+                        sox_chg_pct         = VALUES(sox_chg_pct),
+                        tsm_adr_chg_pct     = VALUES(tsm_adr_chg_pct),
+                        divergence_signal   = VALUES(divergence_signal),
+                        regime_sox          = VALUES(regime_sox),
+                        regime_foreign_oi   = VALUES(regime_foreign_oi),
+                        workflow_cost_usd   = VALUES(workflow_cost_usd)
+                """),
+                {"run_id": run_id, "td": trade_date, "brief_id": brief_id,
+                 "pred_dir": predicted_direction, "pred_gap": predicted_gap_pct,
+                 "foreign": foreign_oi_net, "trust": trust_oi_net, "dealer": dealer_oi_net,
+                 "djia": djia_chg_pct, "ndx": ndx_chg_pct,
+                 "sox": sox_chg_pct, "tsm": tsm_adr_chg_pct,
+                 "div": int(divergence_signal) if divergence_signal is not None else None,
+                 "regime_sox": regime_sox, "regime_foi": regime_foreign_oi,
+                 "cost": workflow_cost_usd},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] log_session_episode failed: {exc}")

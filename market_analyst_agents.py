@@ -19,6 +19,10 @@ load_dotenv()
 
 _OWNER_LINE_ID: Optional[str] = os.getenv("LINE_USER_ID") or None
 
+# Phase 3: context size limits (chars) to guard against runaway input
+_CTX_LIMIT_CHIEF_HISTORY_CHARS = 800   # max chars for injected SQL history
+_CTX_LIMIT_PORTFOLIO_CHARS     = 3000  # max chars for portfolio PnL block
+
 _MODEL_HAIKU  = "claude-haiku-4-5-20251001"
 _MODEL_SONNET = "claude-sonnet-4-6"
 _MODEL_OPUS   = "claude-opus-4-7"
@@ -287,6 +291,16 @@ def chief_strategist_node(state: WorkflowState) -> dict:
         f"技術面報告：\n{state['tech_report']}"
     )
 
+    # Phase 3: inject recent accuracy history so strategist can self-correct
+    try:
+        from database_tools import get_recent_accuracy_context
+        history = get_recent_accuracy_context(days=14)
+        if history:
+            history = history[:_CTX_LIMIT_CHIEF_HISTORY_CHARS]
+            user_content += f"\n\n{history}"
+    except Exception as exc:
+        logger.debug(f"[ChiefStrategist] 歷史上下文載入失敗（略過）: {exc}")
+
     start = time.monotonic()
     response = _llm_opus().invoke([
         SystemMessage(content=_CHIEF_SYSTEM),
@@ -313,16 +327,29 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
         logger.info("[PortfolioManager] 無持倉資料，略過分析")
         return {"portfolio_advice": ""}
 
-    enriched = calculate_pnl(holdings)
+    # Phase 4: emit price_stale event if yfinance fails for any holding
+    try:
+        from telemetry import emit_event
+        enriched = calculate_pnl(holdings)
+        stale = [h["stock_id"] for h in enriched
+                 if h.get("current_price") is None or h.get("current_price") == h.get("entry_price")]
+        if stale:
+            logger.warning(f"[PortfolioManager] 現價可能為舊資料：{stale}")
+            emit_event(run_id, "fallback_activated", "portfolio_manager",
+                       {"reason": "price_stale", "stocks": stale}, severity="warn")
+    except Exception:
+        enriched = holdings  # bare fallback if calculate_pnl itself raises
+
     pnl_lines = [
-        f"股票代碼: {h['stock_id']} | 成本: {h['entry_price']} | 現價: {h['current_price']:.2f} | "
-        f"持股數: {h['quantity']} 股 | 損益: {h['unrealized_pnl']:.2f} ({h['pnl_pct']:.2f}%) | "
-        f"止損觸發: {'是' if h['stop_loss_triggered'] else '否'} | 策略: {h['strategy_type']}"
+        f"股票代碼: {h['stock_id']} | 成本: {h['entry_price']} | 現價: {h.get('current_price', h['entry_price']):.2f} | "
+        f"持股數: {h['quantity']} 股 | 損益: {h.get('unrealized_pnl', 0):.2f} ({h.get('pnl_pct', 0):.2f}%) | "
+        f"止損觸發: {'是' if h.get('stop_loss_triggered') else '否'} | 策略: {h['strategy_type']}"
         for h in enriched
     ]
+    portfolio_block = "\n".join(pnl_lines)[:_CTX_LIMIT_PORTFOLIO_CHARS]
     user_content = (
         f"今日市場展望：\n{state['final_brief']}\n\n"
-        f"使用者持倉損益：\n" + "\n".join(pnl_lines)
+        f"使用者持倉損益：\n{portfolio_block}"
     )
 
     start = time.monotonic()
@@ -427,6 +454,35 @@ def save_to_db_node(state: WorkflowState) -> dict:
         logger.success(f"[SaveToDB] 寫入成功 row_id={row_id}, date={trade_date}")
         emit_event(run_id, "node_success", "save_to_db",
                    {"row_id": row_id, "trade_date": str(trade_date)}, severity="info")
+
+        # Phase 4: log structured session episode for future context injection
+        try:
+            from database_tools import log_session_episode
+            raw = state.get("raw_market_data") or {}
+            chip_div: Optional[bool] = None
+            try:
+                chip_parsed = json.loads(state.get("chip_report", "{}").strip())
+                chip_div = bool(chip_parsed.get("divergence_signal", False))
+            except Exception:
+                pass
+            log_session_episode(
+                run_id=run_id or "",
+                trade_date=trade_date,
+                brief_id=row_id,
+                predicted_direction=gap_dir,
+                predicted_gap_pct=gap_pct,
+                foreign_oi_net=raw.get("foreign_oi_net"),
+                trust_oi_net=raw.get("trust_oi_net"),
+                dealer_oi_net=raw.get("dealer_oi_net"),
+                djia_chg_pct=raw.get("djia_chg_pct"),
+                ndx_chg_pct=raw.get("ndx_chg_pct"),
+                sox_chg_pct=raw.get("sox_chg_pct"),
+                tsm_adr_chg_pct=raw.get("tsm_adr_chg_pct"),
+                divergence_signal=chip_div,
+            )
+        except Exception as exc:
+            logger.debug(f"[SaveToDB] session_episode 寫入略過: {exc}")
+
         return {"db_row_id": row_id}
     except Exception as exc:
         logger.error(f"[SaveToDB] 寫入失敗: {exc}")

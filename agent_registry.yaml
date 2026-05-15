@@ -1,0 +1,438 @@
+# agent_registry.yaml
+# AI Agent Studio — Agent Registry
+# Phase 1: Metadata-only. Does not modify workflow behavior.
+# Schema version: 1.0 | Generated: 2026-05-15
+
+version: "1.0"
+project: "AI Agent Studio — Taiwan Futures Analysis System"
+
+# ── Agent definitions ──────────────────────────────────────────────────────────
+
+agents:
+
+  # ── Investment workflow agents ─────────────────────────────────────────────
+
+  - id: data_collector
+    role: data_preprocessor
+    description: "Extracts compact numeric summary (9 fields) from raw market snapshot JSON"
+    status: active
+    graph: investment_workflow
+    position: 1
+
+    model: claude-haiku-4-5-20251001
+    model_config:
+      max_tokens: 512
+      thinking: none
+
+    tools:
+      reads:  [state.snapshot]
+      writes: [state.raw_market_data]
+    memory_access:
+      reads:  [file.market_snapshot_json]
+      writes: []
+
+    budget:
+      max_input_tokens:  3000
+      max_output_tokens: 512
+      max_cost_usd:      0.003
+      alert_on_exceed:   false
+
+    permissions:
+      - read_snapshot
+    approval_required: false
+    supervisor: chief_strategist
+    reviewer: null
+
+    fallback: "use raw snapshot keys directly (emits fallback_activated event)"
+    known_issues: []
+
+
+  - id: chip_analyst
+    role: chip_data_analyst
+    description: "Analyzes three-party futures open interest → sentiment JSON"
+    status: active
+    graph: investment_workflow
+    position: "2a (parallel branch)"
+
+    model: claude-sonnet-4-6
+    model_config:
+      max_tokens: 512
+      thinking: none
+
+    tools:
+      reads:  [state.raw_market_data, state.snapshot]  # snapshot = fallback
+      writes: [state.chip_report]
+    memory_access:
+      reads:  []
+      writes: []
+
+    budget:
+      max_input_tokens:  2000
+      max_output_tokens: 512
+      max_cost_usd:      0.010
+      alert_on_exceed:   false
+
+    permissions:
+      - read_state
+    approval_required: false
+    supervisor: chief_strategist
+    reviewer: null
+
+    fallback: "use raw snapshot chip data (emits fallback_activated event)"
+    known_issues: []
+
+
+  - id: tech_analyst
+    role: technical_analyst
+    description: "Predicts Taiwan market gap direction from US market performance"
+    status: active
+    graph: investment_workflow
+    position: "2b (parallel branch)"
+
+    model: claude-sonnet-4-6
+    model_config:
+      max_tokens: 512
+      thinking: none
+
+    tools:
+      reads:  [state.raw_market_data, state.snapshot]  # snapshot = fallback
+      writes: [state.tech_report]
+    memory_access:
+      reads:  []
+      writes: []
+
+    budget:
+      max_input_tokens:  2000
+      max_output_tokens: 512
+      max_cost_usd:      0.010
+      alert_on_exceed:   false
+
+    permissions:
+      - read_state
+    approval_required: false
+    supervisor: chief_strategist
+    reviewer: null
+
+    fallback: "use raw snapshot US market data (emits fallback_activated event)"
+    known_issues: []
+
+
+  - id: chief_strategist
+    role: senior_analyst
+    description: >
+      Integrates chip + tech reports into structured investment brief.
+      Top of analyst hierarchy. Uses Opus + Extended Thinking.
+    status: active
+    graph: investment_workflow
+    position: 3
+
+    model: claude-opus-4-7
+    model_config:
+      max_tokens: 4096
+      thinking:
+        type: adaptive
+        # TODO Phase 3: enforce hard cap — budget_tokens: 5000
+        budget_tokens_current: adaptive  # cost explosion risk (see execution_risk_report.md)
+    cost_controls:
+      cost_alert_threshold_usd: 0.080
+      # A-007 alert fires if thinking_tokens > 2048
+
+    tools:
+      reads:  [state.chip_report, state.tech_report]
+      writes: [state.final_brief]
+    memory_access:
+      reads:
+        - db.daily_briefs        # Phase 3: SQL history context injection
+        - db.market_actuals      # Phase 3: accuracy context
+        - db.session_episodes    # Phase 4: structured episodic memory
+      writes: []
+
+    budget:
+      max_input_tokens:  8000
+      max_output_tokens: 4096
+      max_cost_usd:      0.080
+      alert_on_exceed:   true
+
+    permissions:
+      - read_state
+      - read_db_history          # Phase 3
+    approval_required: false
+    supervisor: null             # top of analyst hierarchy
+    reviewer: null
+
+    fallback: "output error notice as brief"
+    known_issues:
+      - "thinking=adaptive has no token cap — worst case $0.60/run (A-007 alert)"
+      - "operates with zero historical memory (Phase 3 adds SQL history injection)"
+
+
+  - id: portfolio_manager
+    role: portfolio_advisor
+    description: "Generates per-holding buy/hold/sell advice based on brief and live PnL"
+    status: active
+    graph: investment_workflow
+    position: 4
+
+    model: claude-sonnet-4-6
+    model_config:
+      max_tokens: 1024
+      thinking: none
+
+    tools:
+      reads:  [state.final_brief, db.user_portfolio, external.yfinance]
+      writes: [state.portfolio_advice]
+    memory_access:
+      reads:  [db.user_portfolio]
+      writes: []
+
+    budget:
+      max_input_tokens:  4000
+      max_output_tokens: 1024
+      max_cost_usd:      0.025
+      alert_on_exceed:   false
+
+    permissions:
+      - read_state
+      - read_db_portfolio
+      - call_external_yfinance
+    approval_required: false
+    supervisor: null
+    reviewer: null
+
+    price_stale_alert: true      # Phase 4: emit event when yfinance fails
+    context_scale_note: "input grows ~65 tokens per holding; action needed at 20+ holdings"
+    known_issues:
+      - "yfinance failure causes silent fallback to cost-basis prices (wrong PnL)"
+
+
+  - id: format_agent
+    role: output_formatter
+    description: "Reformats verbose brief into LINE-optimized ≤2000 character message"
+    status: active
+    graph: investment_workflow
+    position: 5
+
+    model: claude-haiku-4-5-20251001
+    model_config:
+      max_tokens: 2048
+      thinking: none
+
+    tools:
+      reads:  [state.final_brief, state.portfolio_advice]
+      writes: [state.final_report]
+    memory_access:
+      reads:  []
+      writes: []
+
+    budget:
+      max_input_tokens:  4000
+      max_output_tokens: 2048
+      max_cost_usd:      0.015
+      alert_on_exceed:   false
+
+    output_constraint_chars: 2000
+    permissions:
+      - read_state
+    approval_required: false
+    supervisor: null
+    reviewer: null
+    known_issues: []
+
+
+  - id: save_to_db
+    role: persistence_writer
+    description: "Persists brief + gap prediction to TiDB; logs session episode (Phase 4)"
+    status: active
+    graph: investment_workflow
+    position: 6
+    model: null  # no LLM
+
+    tools:
+      reads:  [state.final_brief, state.tech_report, state.snapshot, state.raw_market_data]
+      writes: [db.daily_briefs, db.session_episodes]
+    memory_access:
+      reads:  []
+      writes: [db.daily_briefs, db.session_episodes]
+
+    budget:
+      max_cost_usd: 0.000
+
+    permissions:
+      - write_db_briefs
+    approval_required: false
+    supervisor: null
+    reviewer: null
+    known_issues: []
+
+
+  - id: send_notification
+    role: delivery_agent
+    description: "Dispatches formatted brief to LINE and Telegram channels"
+    status: active
+    graph: investment_workflow
+    position: 7
+    model: null  # no LLM
+
+    tools:
+      reads:  [state.final_report]
+      writes: [external.line_channel, external.telegram_channel]
+    memory_access:
+      reads:  []
+      writes: []
+
+    budget:
+      max_cost_usd: 0.000
+
+    permissions:
+      - push_line
+      - push_telegram
+    dedup_guard: true            # recommended: prevent duplicate push on same trade_date
+    approval_required: false
+    supervisor: null
+    reviewer: null
+    known_issues:
+      - "no retry on delivery failure — A-003 alert fires if both channels fail"
+
+
+  # ── Backtest workflow agents ───────────────────────────────────────────────
+
+  - id: backtest_evaluator
+    role: accuracy_evaluator
+    description: "Compares yesterday's predicted gap vs actual TAIEX open; produces accuracy score"
+    status: active
+    graph: backtest_agent
+    position: 3
+
+    model: claude-haiku-4-5-20251001
+    model_config:
+      max_tokens: 512
+      thinking: none
+
+    tools:
+      reads:  [db.daily_briefs, external.twse_actuals]
+      writes: [db.market_actuals]
+    memory_access:
+      reads:  [db.daily_briefs, db.market_actuals]
+      writes: [db.market_actuals, db.session_episodes]  # Phase 4: backfill actual_*
+
+    budget:
+      max_input_tokens:  2000
+      max_output_tokens: 512
+      max_cost_usd:      0.005
+      alert_on_exceed:   false
+
+    permissions:
+      - read_db_briefs
+      - write_db_actuals
+      - call_external_twse
+    approval_required: false
+    supervisor: null
+    reviewer: null
+    known_issues:
+      - "accuracy_report written to stdout only — not persisted to DB (Phase 4 item)"
+      - "cost not logged to cost_logs"
+
+
+  # ── Maintenance workflow agents ────────────────────────────────────────────
+
+  - id: maintenance_agent
+    role: system_health_monitor
+    description: "Diagnoses Ubuntu server health via MCP system_inspector"
+    status: active
+    graph: maintenance_agent
+    position: 2
+
+    model: claude-haiku-4-5-20251001
+    model_config:
+      max_tokens: 512
+      thinking: none
+
+    tools:
+      reads:  [mcp.system_inspector.get_system_stats]
+      writes: [state.final_analysis]
+    memory_access:
+      reads:  []
+      writes: []
+
+    budget:
+      max_input_tokens:  2000
+      max_output_tokens: 512
+      max_cost_usd:      0.003
+      alert_on_exceed:   false
+
+    permissions:
+      - call_mcp_system_inspector
+    approval_required: false
+    supervisor: null
+    reviewer: null
+
+    mcp_env_whitelist: [PATH, HOME, LANG]
+    known_issues:
+      - "asyncio.run() anti-pattern in sync node — crashes in existing event loop"
+      - "cost not logged to cost_logs"
+
+
+# ── Permission group definitions ───────────────────────────────────────────────
+
+permission_groups:
+
+  read_snapshot:
+    description: "Read market_snapshot.json from filesystem"
+    level: low
+    granted_to: [data_collector]
+
+  read_state:
+    description: "Read WorkflowState fields in LangGraph node context"
+    level: low
+    granted_to: [chip_analyst, tech_analyst, chief_strategist, portfolio_manager,
+                 format_agent, save_to_db, send_notification]
+
+  read_db_history:
+    description: "Read historical briefs and accuracy from TiDB"
+    level: low
+    granted_to: [chief_strategist, backtest_evaluator, alert_runner, dashboard]
+
+  read_db_portfolio:
+    description: "Read user_portfolio records from TiDB"
+    level: low
+    granted_to: [portfolio_manager, dashboard]
+
+  write_db_briefs:
+    description: "Insert rows into daily_briefs and session_episodes tables"
+    level: medium
+    granted_to: [save_to_db]
+
+  write_db_portfolio:
+    description: "Mutate user_portfolio records (add/update/delete)"
+    level: high
+    granted_to: [dashboard, line_webhook]
+    requires_auth: true  # DASH_PASSWORD (dashboard) or LINE signature (webhook)
+
+  push_line:
+    description: "Send message to LINE channel"
+    level: high
+    granted_to: [send_notification, alert_runner, investment_workflow]
+    recommends_dedup: true
+
+  push_telegram:
+    description: "Send message to Telegram channel"
+    level: medium
+    granted_to: [send_notification, alert_runner, investment_workflow]
+
+  call_mcp_system_inspector:
+    description: "Spawn system_inspector.py MCP subprocess"
+    level: low
+    granted_to: [maintenance_agent]
+    env_whitelist: [PATH, HOME, LANG]
+
+  call_external_yfinance:
+    description: "HTTP calls to yfinance for live prices"
+    level: medium
+    granted_to: [portfolio_manager, dashboard]
+    notes: "Unofficial API — handle failure gracefully; emit price_stale event"
+
+  call_external_twse:
+    description: "HTTP calls to TWSE for market actuals"
+    level: medium
+    granted_to: [backtest_evaluator]
+    security_note: "verify=False on TLS — MITM risk. TODO: re-enable TLS verification."

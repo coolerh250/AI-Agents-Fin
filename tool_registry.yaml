@@ -1,0 +1,427 @@
+# tool_registry.yaml
+# AI Agent Studio — Tool Registry
+# Phase 2: Tool governance — orphan marking, audit settings, permission matrix.
+# Schema version: 1.0 | Generated: 2026-05-15
+
+version: "1.0"
+
+# ── MCP Tools ──────────────────────────────────────────────────────────────────
+
+mcp_tools:
+
+  - id: get_system_stats
+    description: "Local OS metrics via psutil (CPU, memory, disk)"
+    server: mcp_servers/system_inspector.py
+    risk_level: low
+    status: active
+    auth_required: false
+    credentials_needed: []
+    consumers: [maintenance_agent]
+    audit_log: true
+    rate_limit: null
+    env_whitelist: [PATH, HOME, LANG]
+
+  - id: get_tw_future_chips
+    description: "TAIFEX institutional open interest via HTML scraping"
+    server: mcp_servers/finance_mcp_server.py
+    risk_level: medium
+    status: active
+    auth_required: false
+    credentials_needed: []
+    consumers: [data_collector_node, chip_analyst_node]
+    audit_log: true
+    rate_limit: "1/minute"
+    env_whitelist: [PATH, HOME, LANG]
+    fragility: "TAIFEX HTML structure changes break collection without notice"
+    security_note: "Output injected into LLM prompts — _sanitize() applied in finance_mcp_server.py"
+
+  - id: get_us_market_summary
+    description: "yfinance wrapper for DJIA, NASDAQ100, SOX, TSMC ADR"
+    server: mcp_servers/finance_mcp_server.py
+    risk_level: medium
+    status: active
+    auth_required: false
+    credentials_needed: []
+    consumers: [data_collector_node, tech_analyst_node]
+    audit_log: true
+    rate_limit: "5/minute"
+    env_whitelist: [PATH, HOME, LANG]
+    notes: "Unofficial yfinance API — no SLA, intermittent failures expected"
+
+  - id: get_financial_news
+    description: "Anue financial news RSS — returns raw news titles"
+    server: mcp_servers/finance_mcp_server.py
+    risk_level: medium
+    status: active
+    auth_required: false
+    credentials_needed: []
+    consumers: [data_collector_node]
+    audit_log: true
+    rate_limit: "5/minute"
+    env_whitelist: [PATH, HOME, LANG]
+    security_note: >
+      PROMPT INJECTION VECTOR — news titles flow directly into LLM prompts.
+      _sanitize() filter in finance_mcp_server.py blocks known patterns.
+      Consider: external news title → always treat as untrusted user input.
+
+  - id: save_brief_to_db
+    description: "Writes investment brief to TiDB — ORPHANED, no consumers in production"
+    server: mcp_servers/finance_mcp_server.py
+    risk_level: high
+    status: orphaned
+    auth_required: false  # SECURITY GAP: any MCP client can invoke
+    credentials_needed: [TIDB_HOST, TIDB_USER, TIDB_PASSWORD]
+    consumers: []
+    audit_log: true
+    remediation:
+      recommended_action: disable
+      timeline: immediate
+      options:
+        - "Option A (5 min): Add MCP_WRITE_TOKEN env check at handler entry — return error if absent"
+        - "Option B (2 min): Remove handler entirely — no consumer exists"
+      production_path: "save_brief() direct call in save_to_db_node (database_tools.py)"
+
+  - id: send_brief_to_user
+    description: "Pushes text to LINE channel — ORPHANED, no consumers in production"
+    server: mcp_servers/finance_mcp_server.py
+    risk_level: critical
+    status: orphaned
+    auth_required: false  # CRITICAL GAP: any MCP client can push to user's LINE
+    credentials_needed: [LINE_CHANNEL_ACCESS_TOKEN]
+    consumers: []
+    audit_log: true
+    remediation:
+      recommended_action: disable
+      timeline: immediate
+      options:
+        - "Option A (2 min): Remove handler entirely — no consumer exists"
+        - "Option B (5 min): Add MCP_NOTIFY_TOKEN guard + log every call"
+      security_note: >
+        CRITICAL — unrestricted LINE push. Any MCP client with server access
+        can send arbitrary text to the user's LINE account.
+
+
+# ── Direct Python Function Calls ───────────────────────────────────────────────
+
+direct_tools:
+
+  # DB layer — database_tools.py
+  - id: save_brief
+    module: database_tools
+    risk_level: medium
+    status: active
+    auth_required: false  # internal — called only from save_to_db node
+    consumers: [save_to_db]
+    audit_log: true
+    notes: "UNIQUE KEY uq_trade_date prevents duplicates (added in observability migration)"
+
+  - id: get_brief
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [backtest_evaluator, alert_runner, dashboard]
+    audit_log: false
+
+  - id: save_actual
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [backtest_evaluator]
+    audit_log: true
+    notes: "ON DUPLICATE KEY UPDATE — safe upsert"
+
+  - id: get_actual
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [backtest_evaluator, dashboard]
+    audit_log: false
+
+  - id: log_cost
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [telemetry]
+    audit_log: false
+    notes: "Extended with thinking_tokens + run_id (observability Phase 6)"
+
+  - id: get_portfolio
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [portfolio_manager, dashboard]
+    audit_log: false
+
+  - id: add_portfolio_item
+    module: database_tools
+    risk_level: high  # mutates user assets
+    status: active
+    auth_required: false  # TODO: dashboard writes are unauthenticated
+    consumers: [dashboard, line_webhook]
+    audit_log: true       # wired in observability Phase 6
+
+  - id: delete_portfolio_item
+    module: database_tools
+    risk_level: high
+    status: active
+    auth_required: false  # TODO
+    consumers: [dashboard, line_webhook]
+    audit_log: true
+
+  - id: update_portfolio_item
+    module: database_tools
+    risk_level: high
+    status: active
+    auth_required: false  # TODO
+    consumers: [dashboard, line_webhook]
+    audit_log: true
+
+  - id: get_recent_accuracy
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [backtest_evaluator, dashboard]
+    audit_log: false
+
+  # Portfolio layer — portfolio_tools.py
+  - id: get_user_portfolio
+    module: portfolio_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [portfolio_manager]
+    audit_log: false
+
+  - id: calculate_pnl
+    module: portfolio_tools
+    risk_level: medium
+    status: active
+    auth_required: false
+    consumers: [portfolio_manager, dashboard]
+    audit_log: false
+    notes: >
+      Calls yfinance per holding — serial HTTP, 1–3s each.
+      Failure silently falls back to cost-basis (stale price).
+      Phase 4: price_stale event emitted on failure.
+
+  # Notification layer — messenger_tools.py
+  - id: send_line
+    module: messenger_tools
+    risk_level: high  # external side-effect + auth token
+    status: active
+    auth_required: false  # token in env; no per-call auth
+    consumers: [send_notification, alert_runner, investment_workflow]
+    audit_log: true
+    rate_limit: "1/day per trade_date (dedup guard recommended)"
+    notes: "LINE credential exposed to MCP subprocesses — env isolation applied in P0"
+
+  - id: send_telegram
+    module: messenger_tools
+    risk_level: high
+    status: active
+    auth_required: false
+    consumers: [send_notification, alert_runner, investment_workflow]
+    audit_log: true
+
+  # Market data — twse_fetcher.py
+  - id: get_taiex_actuals
+    module: twse_fetcher
+    risk_level: medium
+    status: active
+    auth_required: false
+    consumers: [backtest_evaluator]
+    audit_log: false
+    security_note: "verify=False on TLS connection — MITM risk. TODO: re-enable."
+
+  # Observability layer (Phase 2 addition)
+  - id: log_tool_call
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: []  # passive — called by tool wrappers
+    audit_log: false  # IS the audit log
+    notes: "Phase 2: writes to tool_audit_log table"
+
+  # Memory layer (Phase 4 additions)
+  - id: get_recent_accuracy_context
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [chief_strategist]
+    audit_log: false
+    notes: "Phase 3: returns last 10-day prediction accuracy string for context injection"
+
+  - id: log_session_episode
+    module: database_tools
+    risk_level: low
+    status: active
+    auth_required: false
+    consumers: [save_to_db]
+    audit_log: false
+    notes: "Phase 4: upserts session_episodes row; actual_* backfilled by backtest_agent"
+
+
+# ── LLM Invocation Tools ───────────────────────────────────────────────────────
+
+llm_tools:
+
+  - id: data_collector_llm
+    model: claude-haiku-4-5-20251001
+    node: data_collector_node
+    risk_level: low
+    status: active
+    consumers: [investment_workflow]
+    audit_log: true  # via llm_traces table
+
+  - id: chip_analyst_llm
+    model: claude-sonnet-4-6
+    node: chip_analyst_node
+    risk_level: low
+    status: active
+    consumers: [investment_workflow]
+    audit_log: true
+
+  - id: tech_analyst_llm
+    model: claude-sonnet-4-6
+    node: tech_analyst_node
+    risk_level: low
+    status: active
+    consumers: [investment_workflow]
+    audit_log: true
+
+  - id: chief_strategist_llm
+    model: claude-opus-4-7
+    node: chief_strategist_node
+    risk_level: high  # token cost explosion risk
+    status: active
+    consumers: [investment_workflow]
+    audit_log: true
+    cost_controls:
+      max_tokens: 4096
+      thinking_budget_tokens: 5000  # TODO: enforce (currently adaptive)
+      cost_alert_threshold_usd: 0.080
+      alert_id: A-007
+
+  - id: portfolio_manager_llm
+    model: claude-sonnet-4-6
+    node: portfolio_manager_node
+    risk_level: medium
+    status: active
+    consumers: [investment_workflow]
+    audit_log: true
+
+  - id: format_agent_llm
+    model: claude-haiku-4-5-20251001
+    node: format_agent_node
+    risk_level: low
+    status: active
+    consumers: [investment_workflow]
+    audit_log: true
+
+  - id: evaluate_llm
+    model: claude-haiku-4-5-20251001
+    node: evaluate_node
+    risk_level: low
+    status: active
+    consumers: [backtest_agent]
+    audit_log: false
+    known_issues:
+      - "cost not logged to cost_logs (Phase 4 item)"
+
+  - id: maintenance_llm
+    model: claude-haiku-4-5-20251001
+    node: think_node
+    risk_level: low
+    status: active
+    consumers: [maintenance_agent]
+    audit_log: false
+    known_issues:
+      - "cost not logged to cost_logs"
+      - "asyncio.run() anti-pattern in sync node"
+
+
+# ── Permission groups ──────────────────────────────────────────────────────────
+
+permission_groups:
+
+  read_snapshot:
+    level: low
+    granted_to: [data_collector]
+
+  read_state:
+    level: low
+    granted_to: [chip_analyst, tech_analyst, chief_strategist, portfolio_manager,
+                 format_agent, save_to_db, send_notification]
+
+  read_db_history:
+    level: low
+    granted_to: [chief_strategist, backtest_evaluator, alert_runner, dashboard]
+
+  read_db_portfolio:
+    level: low
+    granted_to: [portfolio_manager, dashboard]
+
+  write_db_briefs:
+    level: medium
+    granted_to: [save_to_db]
+
+  write_db_portfolio:
+    level: high
+    granted_to: [dashboard, line_webhook]
+    requires_auth: true
+
+  push_line:
+    level: high
+    granted_to: [send_notification, alert_runner, investment_workflow]
+    recommends_dedup: true
+
+  push_telegram:
+    level: medium
+    granted_to: [send_notification, alert_runner, investment_workflow]
+
+  call_mcp_system_inspector:
+    level: low
+    granted_to: [maintenance_agent]
+    env_whitelist: [PATH, HOME, LANG]
+
+  call_external_yfinance:
+    level: medium
+    granted_to: [portfolio_manager, dashboard]
+
+  call_external_twse:
+    level: medium
+    granted_to: [backtest_evaluator]
+
+
+# ── Orphan tool action plan ────────────────────────────────────────────────────
+
+orphan_action_plan:
+
+  save_brief_to_db:
+    risk: high
+    recommended_action: add_auth_guard
+    timeline: immediate
+    effort: "5 minutes"
+    instructions: |
+      In mcp_servers/finance_mcp_server.py, at entry of save_brief_to_db handler:
+        token = os.getenv("MCP_WRITE_TOKEN", "")
+        if not token:
+            return {"error": "MCP_WRITE_TOKEN not set — write operations disabled"}
+      Add MCP_WRITE_TOKEN= to .env.template.
+
+  send_brief_to_user:
+    risk: critical
+    recommended_action: remove_handler
+    timeline: immediate
+    effort: "2 minutes"
+    instructions: |
+      Remove send_brief_to_user handler from mcp_servers/finance_mcp_server.py entirely.
+      No consumer exists. Keeping it is an unrestricted remote LINE push vulnerability.
