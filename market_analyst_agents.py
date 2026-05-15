@@ -35,6 +35,7 @@ class WorkflowState(TypedDict):
     final_brief:      str             # verbose output from chief_strategist
     final_report:     str             # LINE-formatted output from format_agent
     db_row_id:        Optional[int]
+    portfolio_advice: str
 
 
 # ── System prompts ────────────────────────────────────────────────────────────
@@ -89,12 +90,23 @@ _CHIEF_SYSTEM = """你是台灣股期分析團隊的總合規劃師（Chief Stra
 【風險提示】
 （一句話提醒主要風險因素）"""
 
+_PORTFOLIO_SYSTEM = """你是一個私人資產顧問，請結合 ChiefStrategist 的今日展望與使用者的 Portfolio 資料。
+如果大盤看空且個股跌破 stop_loss_level，請產出明確的『今日賣出建議』。
+如果一切正常，請產出『建議續抱，壓力位在 X，支撐位在 Y』。
+請針對每筆持股給出具體建議，格式如下：
+【股票代碼：XXXX】
+- 現價：XXX 元（成本：XXX 元，損益：±X.X%）
+- 建議動作：（買入/續抱/減碼/賣出）
+- 原因：（一句話）"""
+
 _FORMAT_SYSTEM = """你是 LINE 推播格式化 Agent。
 將投報建議書重新排版為適合手機閱讀的 LINE 訊息：
 - 總長度不超過 2000 字
 - 每個段落前加上合適的 emoji（📊 盤勢、⚔️ 策略、🛡️ 防守、⚠️ 風險）
 - 保留原文核心內容，去除冗餘文字
-- 直接輸出格式化後的訊息，不加任何說明"""
+- 直接輸出格式化後的訊息，不加任何說明
+- 若使用者持股診斷內容不為空，請在訊息末尾加入【個人持股診斷】段落（emoji: 💼），並原文放入診斷內容
+- 若持股診斷內容為空，略過【個人持股診斷】段落"""
 
 
 # ── LLM factories ─────────────────────────────────────────────────────────────
@@ -244,11 +256,50 @@ def chief_strategist_node(state: WorkflowState) -> dict:
     return {"final_brief": result}
 
 
+# ── Node: PortfolioManager (Sonnet) ──────────────────────────────────────────
+
+def portfolio_manager_node(state: WorkflowState) -> dict:
+    logger.info("[PortfolioManager] 載入持倉並計算損益")
+    from portfolio_tools import get_user_portfolio, calculate_pnl
+
+    holdings = get_user_portfolio()
+    if not holdings:
+        logger.info("[PortfolioManager] 無持倉資料，略過分析")
+        return {"portfolio_advice": ""}
+
+    enriched = calculate_pnl(holdings)
+    pnl_lines = [
+        f"股票代碼: {h['stock_id']} | 成本: {h['entry_price']} | 現價: {h['current_price']:.2f} | "
+        f"持股數: {h['quantity']} 股 | 損益: {h['unrealized_pnl']:.2f} ({h['pnl_pct']:.2f}%) | "
+        f"止損觸發: {'是' if h['stop_loss_triggered'] else '否'} | 策略: {h['strategy_type']}"
+        for h in enriched
+    ]
+    user_content = (
+        f"今日市場展望：\n{state['final_brief']}\n\n"
+        f"使用者持倉損益：\n" + "\n".join(pnl_lines)
+    )
+
+    start = time.monotonic()
+    response = _llm(_MODEL_SONNET, max_tokens=1024).invoke([
+        SystemMessage(content=_PORTFOLIO_SYSTEM),
+        HumanMessage(content=user_content),
+    ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage("portfolio_manager", _MODEL_SONNET, response, latency_ms)
+
+    result = _extract_text(response)
+    logger.success("[PortfolioManager] 持股診斷完成")
+    return {"portfolio_advice": result}
+
+
 # ── Node: FormatAgent (Haiku) ─────────────────────────────────────────────────
 
 def format_agent_node(state: WorkflowState) -> dict:
     logger.info("[FormatAgent] 格式化為 LINE 推播格式")
+    portfolio_section = state.get("portfolio_advice", "")
     user_content = f"原始建議書：\n{state['final_brief']}"
+    if portfolio_section:
+        user_content += f"\n\n使用者持股診斷：\n{portfolio_section}"
 
     start = time.monotonic()
     response = _llm(_MODEL_HAIKU, max_tokens=2048).invoke([
@@ -261,6 +312,29 @@ def format_agent_node(state: WorkflowState) -> dict:
     result = _extract_text(response)
     logger.success("[FormatAgent] LINE 格式化完成")
     return {"final_report": result}
+
+
+# ── Node: SendNotification (no LLM) ──────────────────────────────────────────
+
+def send_notification_node(state: WorkflowState) -> dict:
+    logger.info("[SendNotification] 推播 LINE / Telegram")
+    from messenger_tools import send_brief
+
+    report = state.get("final_report", "")
+    if not report:
+        logger.warning("[SendNotification] final_report 為空，略過推播")
+        return {}
+
+    results = send_brief(report)
+    for channel, res in results.items():
+        status = res.get("status")
+        if status == "ok":
+            logger.success(f"[SendNotification] {channel} 推播成功")
+        elif status == "skipped":
+            logger.info(f"[SendNotification] {channel} 略過（{res.get('reason', '')}）")
+        else:
+            logger.warning(f"[SendNotification] {channel} 推播失敗：{res.get('error', '')}")
+    return {}
 
 
 # ── Node: SaveToDB (no LLM) ───────────────────────────────────────────────────

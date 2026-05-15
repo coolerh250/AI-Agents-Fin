@@ -1,7 +1,7 @@
 """
 backtest_agent.py
 Taiwan Stock Futures Analysis Team — Self-Reflection Agent
-Reads yesterday's brief from TiDB, fetches actual TWII market data,
+Reads yesterday's brief from TiDB, fetches actual TAIEX data from TWSE,
 compares prediction vs reality, and outputs an accuracy report.
 """
 import json
@@ -10,7 +10,6 @@ import sys
 from datetime import date, timedelta
 from typing import Optional, TypedDict
 
-import yfinance as yf
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -75,45 +74,25 @@ def load_brief_node(state: BacktestState) -> dict:
 
 
 def fetch_actual_node(state: BacktestState) -> dict:
-    """Fetch actual TWII open/close for trade_date via yfinance and save to DB."""
-    logger.info(f"[FetchActual] 抓取 ^TWII 真實走勢 ({state['trade_date']})")
+    """Fetch actual TAIEX close data for trade_date from TWSE and save to DB."""
+    logger.info(f"[FetchActual] 抓取 TWSE 加權指數盤後資訊 ({state['trade_date']})")
     try:
+        from twse_fetcher import get_taiex_actuals
         trade_date = date.fromisoformat(state["trade_date"])
-        start = trade_date - timedelta(days=7)
-        end = trade_date + timedelta(days=1)
+        actual = get_taiex_actuals(trade_date)
+        if actual is None:
+            raise ValueError(f"TWSE 無法取得 {trade_date} 資料（假日或查詢失敗）")
 
-        hist = yf.Ticker("^TWII").history(start=start, end=end)
-        if hist.empty:
-            raise ValueError("yfinance returned no data for ^TWII")
-
-        hist.index = hist.index.date
-        if trade_date not in hist.index:
-            raise ValueError(f"No ^TWII data for {trade_date} (market closed?)")
-
-        prev_dates = [d for d in hist.index if d < trade_date]
-        if not prev_dates:
-            raise ValueError("No previous close available")
-
-        prev_close = float(hist.loc[max(prev_dates), "Close"])
-        open_price = float(hist.loc[trade_date, "Open"])
-        close_price = float(hist.loc[trade_date, "Close"])
-        actual_gap_pct = round((open_price - prev_close) / prev_close * 100, 2)
-        close_chg_pct  = round((close_price - prev_close) / prev_close * 100, 2)
-
-        actual = {
-            "trade_date":    str(trade_date),
-            "prev_close":    round(prev_close, 2),
-            "open_price":    round(open_price, 2),
-            "close_price":   round(close_price, 2),
-            "actual_gap_pct": actual_gap_pct,
-            "close_chg_pct":  close_chg_pct,
-        }
-
-        # Persist to market_actuals
         try:
             from database_tools import save_actual
-            save_actual(trade_date, open_price, close_price, actual_gap_pct)
-            logger.success(f"[FetchActual] 已寫入 market_actuals: gap={actual_gap_pct}%")
+            save_actual(
+                trade_date,
+                actual["open_price"],
+                actual["close_price"],
+                actual["actual_gap_pct"],
+                notes="source=TWSE",
+            )
+            logger.success(f"[FetchActual] 已寫入 market_actuals: 收盤={actual['close_price']} 漲跌={actual['actual_gap_pct']:+.2f}%")
         except Exception as db_exc:
             logger.warning(f"[FetchActual] 寫入 DB 失敗（繼續）: {db_exc}")
 
@@ -183,10 +162,16 @@ def main():
         logger.error("ANTHROPIC_API_KEY not set — aborting")
         sys.exit(1)
 
-    # Default: backtest yesterday (last trading session)
-    trade_date = (date.today() - timedelta(days=1)).isoformat()
     if len(sys.argv) > 1:
         trade_date = sys.argv[1]
+    else:
+        # Auto-select most recent brief date (handles weekends / holidays)
+        try:
+            from database_tools import get_recent_accuracy
+            recent = get_recent_accuracy(7)
+            trade_date = str(recent[0]["trade_date"]) if recent else (date.today() - timedelta(days=1)).isoformat()
+        except Exception:
+            trade_date = (date.today() - timedelta(days=1)).isoformat()
 
     logger.info(f"回測日期：{trade_date}")
 

@@ -1,0 +1,147 @@
+%% Taiwan Stock Futures Analysis Team — LangGraph Visualization
+%% AI Agent Studio | 2026-05-15
+
+%% ─────────────────────────────────────────────────────────────────────────────
+%% GRAPH 1: Investment Workflow (Primary Production)
+%% File: investment_workflow.py
+%% Pattern: Fan-out → Barrier Join → Linear tail
+%% ─────────────────────────────────────────────────────────────────────────────
+
+graph TD
+    subgraph IW ["🏦 Graph 1: investment_workflow  (runs daily 08:20 CST via cron)"]
+        direction TB
+
+        IW_START(["▶ START"])
+        IW_DC["data_collector\n🔵 Haiku 4.5\n~$0.002 | ~1s"]
+        IW_CA["chip_analyst\n🟣 Sonnet 4.6\n~$0.005 | ~2s"]
+        IW_TA["tech_analyst\n🟣 Sonnet 4.6\n~$0.004 | ~2s"]
+        IW_CS["chief_strategist\n🔴 Opus 4.7 + Thinking\n~$0.053 | 15–45s\n⚠️ NO budget_tokens cap"]
+        IW_PM["portfolio_manager\n🟣 Sonnet 4.6\n~$0.008 | ~2.5s\n+ yfinance live price"]
+        IW_FA["format_agent\n🔵 Haiku 4.5\n~$0.004 | ~1s"]
+        IW_DB["save_to_db\n⚙️ No LLM\n~$0 | ~0.2s\nTiDB write"]
+        IW_SN["send_notification\n⚙️ No LLM\n~$0 | ~0.5s\nLINE + Telegram"]
+        IW_END(["⏹ END"])
+
+        IW_START --> IW_DC
+        IW_DC -->|"fan-out ①"| IW_CA
+        IW_DC -->|"fan-out ②"| IW_TA
+        IW_CA -->|"barrier join"| IW_CS
+        IW_TA -->|"barrier join"| IW_CS
+        IW_CS --> IW_PM
+        IW_PM --> IW_FA
+        IW_FA --> IW_DB
+        IW_DB --> IW_SN
+        IW_SN --> IW_END
+    end
+
+    subgraph IW_MISSING ["❌ Missing Patterns in Graph 1"]
+        direction LR
+        M1["❌ No checkpointer\n(MemorySaver)"]
+        M2["❌ No retry logic\n(.with_retry)"]
+        M3["❌ No conditional\nrouting"]
+        M4["❌ No interrupt\nfor human review"]
+    end
+
+    IW_DB -.->|"writes"| DB1[("TiDB\ndaily_briefs")]
+    IW_DB -.->|"writes"| DB2[("TiDB\ncost_logs")]
+
+    style IW_CS fill:#ff4444,color:#fff
+    style IW_DC fill:#4488ff,color:#fff
+    style IW_CA fill:#9944ff,color:#fff
+    style IW_TA fill:#9944ff,color:#fff
+    style IW_PM fill:#9944ff,color:#fff
+    style IW_FA fill:#4488ff,color:#fff
+    style IW_DB fill:#888,color:#fff
+    style IW_SN fill:#888,color:#fff
+
+%% ─────────────────────────────────────────────────────────────────────────────
+%% GRAPH 2: Backtest Agent (Post-market evaluation)
+%% File: backtest_agent.py
+%% Pattern: Pure linear pipeline
+%% ─────────────────────────────────────────────────────────────────────────────
+
+graph TD
+    subgraph BA ["🔬 Graph 2: backtest_agent  (runs daily ~09:00 CST via cron)"]
+        direction LR
+
+        BA_START(["▶ START"])
+        BA_LB["load_brief\n⚙️ No LLM\nTiDB SELECT"]
+        BA_FA["fetch_actual\n⚙️ No LLM\nTWSE HTTP + TiDB UPSERT\n⚠️ verify=False SSL"]
+        BA_EV["evaluate\n🔵 Haiku 4.5\n~$0.005 | ~1.5s\n⚠️ output never persisted"]
+        BA_END(["⏹ END"])
+
+        BA_START --> BA_LB --> BA_FA --> BA_EV --> BA_END
+    end
+
+    BA_LB -.->|"reads"| DB1[("TiDB\ndaily_briefs")]
+    BA_FA -.->|"writes"| DB3[("TiDB\nmarket_actuals")]
+    BA_EV -.->|"stdout only\n❌ not written"| MISSING["❌ No accuracy_logs\ntable or persistence"]
+
+    style BA_EV fill:#ff9944,color:#fff
+    style MISSING fill:#ff4444,color:#fff,stroke-dasharray:5
+
+%% ─────────────────────────────────────────────────────────────────────────────
+%% GRAPH 3: Maintenance Agent (manual run only)
+%% File: agent_orchestrator.py
+%% Pattern: Pure 2-node pipeline with async MCP subprocess
+%% ─────────────────────────────────────────────────────────────────────────────
+
+graph TD
+    subgraph MA ["🔧 Graph 3: maintenance_agent  (manual only — not in cron)"]
+        direction LR
+
+        MA_START(["▶ START"])
+        MA_ACT["act_node\n⚙️ No LLM\nasyncio.run() ← ⚠️ sync wrapper\nMCP stdio subprocess"]
+        MA_TK["think_node\n🔵 Haiku 4.5\n~$0.002 | ~1.5s\n❌ cost not logged"]
+        MA_END(["⏹ END\noutput: READY/WARNING/CRITICAL"])
+
+        MA_START --> MA_ACT --> MA_TK --> MA_END
+    end
+
+    MA_ACT -.->|"subprocess spawn\n~2s cold start"| MCP["⚙️ system_inspector.py\nMCP stdio server\n(psutil stats)"]
+
+    style MA_TK fill:#4488ff,color:#fff
+    style MA_ACT fill:#888,color:#fff
+
+%% ─────────────────────────────────────────────────────────────────────────────
+%% CROSS-GRAPH DATA FLOW
+%% Shows how the three graphs interact via shared TiDB and file system
+%% ─────────────────────────────────────────────────────────────────────────────
+
+graph LR
+    subgraph CRON ["⏰ Cron Schedule (weekdays)"]
+        C1["08:00 — test_collection.py\n(not a LangGraph graph)"]
+        C2["08:20 — investment_workflow\n(Graph 1)"]
+        C3["09:00 — backtest_agent\n(Graph 2)"]
+    end
+
+    subgraph STORAGE ["💾 Shared State"]
+        F1["market_snapshot.json\n(file, overwritten daily)"]
+        DB_BR[("daily_briefs")]
+        DB_MA[("market_actuals")]
+        DB_CL[("cost_logs")]
+        DB_UP[("user_portfolio")]
+    end
+
+    subgraph EXTERNAL ["🌐 External APIs"]
+        E1["Anthropic API\n(Claude models)"]
+        E2["TWSE Public API\n(TAIEX data)"]
+        E3["TAIFEX Scraper\n(chip data)"]
+        E4["Yahoo Finance\n(live stock prices)"]
+        E5["LINE Messaging API\n(push notifications)"]
+    end
+
+    C1 -->|"produces"| F1
+    F1 -->|"read at start"| C2
+    C2 -->|"writes brief"| DB_BR
+    C2 -->|"writes costs"| DB_CL
+    C2 -->|"reads portfolio"| DB_UP
+    C2 -->|"pushes to"| E5
+    C3 -->|"reads brief"| DB_BR
+    C3 -->|"writes actual"| DB_MA
+
+    C1 -.-> E3
+    C1 -.-> E2
+    C2 -.-> E1
+    C2 -.-> E4
+    C3 -.-> E2

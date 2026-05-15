@@ -165,6 +165,88 @@ def get_cost_trend(days: int = 30) -> list[dict]:
     return [dict(r._mapping) for r in rows]
 
 
+def ensure_portfolio_table() -> None:
+    with _engine().begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_portfolio (
+                id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+                stock_id         VARCHAR(20)   NOT NULL,
+                entry_price      DECIMAL(10,2) NOT NULL,
+                quantity         INT           NOT NULL,
+                stop_loss_level  DECIMAL(5,2)  NOT NULL DEFAULT 5.00,
+                strategy_type    VARCHAR(20)   NOT NULL DEFAULT '波段',
+                created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_stock_entry (stock_id, entry_price)
+            )
+        """))
+
+
+def get_portfolio() -> list[dict]:
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM user_portfolio ORDER BY created_at")
+        ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+def add_portfolio_item(
+    stock_id: str,
+    entry_price: float,
+    quantity: int,
+    stop_loss_level: float = 5.0,
+    strategy_type: str = "波段",
+) -> bool:
+    """Insert a new holding. Returns False if (stock_id, entry_price) already exists."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO user_portfolio
+                        (stock_id, entry_price, quantity, stop_loss_level, strategy_type)
+                    VALUES (:sid, :entry, :qty, :sl, :strat)
+                """),
+                {"sid": stock_id, "entry": entry_price, "qty": quantity,
+                 "sl": stop_loss_level, "strat": strategy_type},
+            )
+        return True
+    except Exception:
+        return False
+
+
+def delete_portfolio_item(item_id: int) -> None:
+    with _engine().begin() as conn:
+        conn.execute(text("DELETE FROM user_portfolio WHERE id = :id"), {"id": item_id})
+
+
+def update_portfolio_item(
+    item_id: int,
+    quantity: int,
+    stop_loss_level: float,
+    strategy_type: str,
+) -> None:
+    with _engine().begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE user_portfolio
+                SET quantity = :qty, stop_loss_level = :sl, strategy_type = :strat
+                WHERE id = :id
+            """),
+            {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type, "id": item_id},
+        )
+
+
+def seed_test_portfolio() -> None:
+    with _engine().begin() as conn:
+        conn.execute(
+            text("""
+                INSERT IGNORE INTO user_portfolio
+                    (stock_id, entry_price, quantity, stop_loss_level, strategy_type)
+                VALUES (:sid, :entry, :qty, :sl, :strat)
+            """),
+            {"sid": "2330", "entry": 1000.00, "qty": 1000, "sl": 5.00, "strat": "波段"},
+        )
+
+
 def get_recent_accuracy(days: int = 5) -> list[dict]:
     """Return last N trade days joining daily_briefs and market_actuals."""
     sql = """

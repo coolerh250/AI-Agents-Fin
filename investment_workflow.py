@@ -19,7 +19,9 @@ from market_analyst_agents import (
     chip_analyst_node,
     data_collector_node,
     format_agent_node,
+    portfolio_manager_node,
     save_to_db_node,
+    send_notification_node,
     tech_analyst_node,
     _MODEL_HAIKU,
     _PRICING,
@@ -44,17 +46,21 @@ def build_graph():
     graph.add_node("chip_analyst",     chip_analyst_node)
     graph.add_node("tech_analyst",     tech_analyst_node)
     graph.add_node("chief_strategist", chief_strategist_node)
+    graph.add_node("portfolio_manager", portfolio_manager_node)
     graph.add_node("format_agent",     format_agent_node)
-    graph.add_node("save_to_db",       save_to_db_node)
+    graph.add_node("save_to_db",          save_to_db_node)
+    graph.add_node("send_notification",   send_notification_node)
 
-    graph.add_edge(START,              "data_collector")
-    graph.add_edge("data_collector",   "chip_analyst")
-    graph.add_edge("data_collector",   "tech_analyst")
-    graph.add_edge("chip_analyst",     "chief_strategist")
-    graph.add_edge("tech_analyst",     "chief_strategist")
-    graph.add_edge("chief_strategist", "format_agent")
-    graph.add_edge("format_agent",     "save_to_db")
-    graph.add_edge("save_to_db",       END)
+    graph.add_edge(START,                  "data_collector")
+    graph.add_edge("data_collector",       "chip_analyst")
+    graph.add_edge("data_collector",       "tech_analyst")
+    graph.add_edge("chip_analyst",         "chief_strategist")
+    graph.add_edge("tech_analyst",         "chief_strategist")
+    graph.add_edge("chief_strategist",     "portfolio_manager")
+    graph.add_edge("portfolio_manager",    "format_agent")
+    graph.add_edge("format_agent",         "save_to_db")
+    graph.add_edge("save_to_db",           "send_notification")
+    graph.add_edge("send_notification",    END)
 
     return graph.compile()
 
@@ -69,7 +75,7 @@ def _print_cost_report() -> None:
             return
 
         # Order by workflow sequence
-        _order = ["data_collector", "chip_analyst", "tech_analyst", "chief_strategist", "format_agent"]
+        _order = ["data_collector", "chip_analyst", "tech_analyst", "chief_strategist", "portfolio_manager", "format_agent"]
         rows.sort(key=lambda r: _order.index(r["agent_name"]) if r["agent_name"] in _order else 99)
 
         haiku_input_rate  = _PRICING[_MODEL_HAIKU]["input"]
@@ -120,8 +126,10 @@ def main():
         logger.error(f"{SNAPSHOT_FILE} not found — run test_collection.py first")
         sys.exit(1)
 
-    from database_tools import ensure_cost_logs_table
+    from database_tools import ensure_cost_logs_table, ensure_portfolio_table, seed_test_portfolio
     ensure_cost_logs_table()
+    ensure_portfolio_table()
+    seed_test_portfolio()
 
     snapshot = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
     logger.info(f"Snapshot loaded: {snapshot['timestamp']}")
@@ -139,6 +147,7 @@ def main():
         final_brief="",
         final_report="",
         db_row_id=None,
+        portfolio_advice="",
     )
 
     logger.info("Invoking LangGraph workflow...")
