@@ -93,6 +93,78 @@ def get_actual(trade_date: date) -> Optional[dict]:
     return dict(row._mapping) if row else None
 
 
+def ensure_cost_logs_table() -> None:
+    with _engine().begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cost_logs (
+                id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+                agent_name         VARCHAR(50)    NOT NULL,
+                model_name         VARCHAR(100)   NOT NULL,
+                input_tokens       INT            NOT NULL DEFAULT 0,
+                output_tokens      INT            NOT NULL DEFAULT 0,
+                estimated_cost_usd DECIMAL(10,6)  NOT NULL DEFAULT 0.000000,
+                latency_ms         INT,
+                logged_at          TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_agent (agent_name),
+                INDEX idx_logged_at (logged_at)
+            )
+        """))
+
+
+def log_cost(
+    agent_name: str,
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    estimated_cost_usd: float,
+    latency_ms: Optional[int] = None,
+) -> None:
+    with _engine().begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO cost_logs
+                    (agent_name, model_name, input_tokens, output_tokens,
+                     estimated_cost_usd, latency_ms)
+                VALUES (:agent, :model, :in_tok, :out_tok, :cost, :lat)
+            """),
+            {"agent": agent_name, "model": model_name,
+             "in_tok": input_tokens, "out_tok": output_tokens,
+             "cost": estimated_cost_usd, "lat": latency_ms},
+        )
+
+
+def get_cost_summary(days: int = 30) -> list[dict]:
+    sql = """
+        SELECT agent_name, model_name,
+               SUM(input_tokens)       AS total_input,
+               SUM(output_tokens)      AS total_output,
+               SUM(estimated_cost_usd) AS total_cost_usd,
+               AVG(latency_ms)         AS avg_latency_ms,
+               COUNT(*)                AS runs
+        FROM cost_logs
+        WHERE logged_at >= NOW() - INTERVAL :days DAY
+        GROUP BY agent_name, model_name
+        ORDER BY total_cost_usd DESC
+    """
+    with _engine().connect() as conn:
+        rows = conn.execute(text(sql), {"days": days}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+def get_cost_trend(days: int = 30) -> list[dict]:
+    sql = """
+        SELECT DATE(logged_at) AS day,
+               SUM(estimated_cost_usd) AS daily_cost_usd
+        FROM cost_logs
+        WHERE logged_at >= NOW() - INTERVAL :days DAY
+        GROUP BY DATE(logged_at)
+        ORDER BY day
+    """
+    with _engine().connect() as conn:
+        rows = conn.execute(text(sql), {"days": days}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
 def get_recent_accuracy(days: int = 5) -> list[dict]:
     """Return last N trade days joining daily_briefs and market_actuals."""
     sql = """

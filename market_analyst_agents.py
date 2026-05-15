@@ -1,10 +1,11 @@
 """
 market_analyst_agents.py
-Taiwan Stock Futures Analysis Team — Phase 2
-Agent nodes: ChipAnalyst, TechnicalAnalyst, ChiefStrategist, SaveToDB
+Taiwan Stock Futures Analysis Team — Phase 4
+Model routing: Haiku (collector/format) · Sonnet (analysts) · Opus+Thinking (strategist)
 """
 import json
 import os
+import time
 from datetime import date
 from typing import Optional, TypedDict
 
@@ -15,16 +16,35 @@ from loguru import logger
 
 load_dotenv()
 
-MODEL_ID = "claude-haiku-4-5-20251001"
+_MODEL_HAIKU  = "claude-haiku-4-5-20251001"
+_MODEL_SONNET = "claude-sonnet-4-6"
+_MODEL_OPUS   = "claude-opus-4-7"
+
+_PRICING = {  # USD per 1M tokens
+    _MODEL_HAIKU:  {"input": 1.00, "output":  5.00},
+    _MODEL_SONNET: {"input": 3.00, "output": 15.00},
+    _MODEL_OPUS:   {"input": 5.00, "output": 25.00},
+}
 
 
 class WorkflowState(TypedDict):
     snapshot:         dict
+    raw_market_data:  dict            # compact summary from data_collector
     chip_report:      str
     tech_report:      str
-    final_brief:      str
-    db_row_id:        Optional[int]   # set by save_to_db_node after DB write
+    final_brief:      str             # verbose output from chief_strategist
+    final_report:     str             # LINE-formatted output from format_agent
+    db_row_id:        Optional[int]
 
+
+# ── System prompts ────────────────────────────────────────────────────────────
+
+_COLLECTOR_SYSTEM = """你是資料前處理 Agent。
+從原始快照中提取關鍵數值，以 JSON 回應（不加 code block）：
+{"foreign_oi_net": int, "trust_oi_net": int, "dealer_oi_net": int,
+ "djia_chg_pct": float, "ndx_chg_pct": float,
+ "sox_chg_pct": float, "tsm_adr_chg_pct": float,
+ "data_ok": bool, "missing_fields": []}"""
 
 _CHIP_SYSTEM = """你是台灣期貨市場籌碼專家。根據三大法人留倉數據分析多空力道。
 判斷規則：
@@ -69,80 +89,196 @@ _CHIEF_SYSTEM = """你是台灣股期分析團隊的總合規劃師（Chief Stra
 【風險提示】
 （一句話提醒主要風險因素）"""
 
+_FORMAT_SYSTEM = """你是 LINE 推播格式化 Agent。
+將投報建議書重新排版為適合手機閱讀的 LINE 訊息：
+- 總長度不超過 2000 字
+- 每個段落前加上合適的 emoji（📊 盤勢、⚔️ 策略、🛡️ 防守、⚠️ 風險）
+- 保留原文核心內容，去除冗餘文字
+- 直接輸出格式化後的訊息，不加任何說明"""
 
-def _llm() -> ChatAnthropic:
+
+# ── LLM factories ─────────────────────────────────────────────────────────────
+
+def _llm(model: str, max_tokens: int = 1024) -> ChatAnthropic:
     return ChatAnthropic(
-        model=MODEL_ID,
+        model=model,
         api_key=os.getenv("ANTHROPIC_API_KEY"),
-        max_tokens=1024,
+        max_tokens=max_tokens,
     )
 
 
+def _llm_opus() -> ChatAnthropic:
+    return ChatAnthropic(
+        model=_MODEL_OPUS,
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "high"},
+    )
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _calc_cost(model: str, input_tok: int, output_tok: int) -> float:
+    p = _PRICING[model]
+    return (input_tok * p["input"] + output_tok * p["output"]) / 1_000_000
+
+
+def _extract_text(response) -> str:
+    c = response.content
+    if isinstance(c, str):
+        return c.strip()
+    return "\n".join(
+        b["text"] for b in c if isinstance(b, dict) and b.get("type") == "text"
+    ).strip()
+
+
+def _record_usage(agent_name: str, model: str, response, latency_ms: int) -> None:
+    try:
+        from database_tools import log_cost
+        usage = response.usage_metadata or {}
+        in_tok  = usage.get("input_tokens", 0)
+        out_tok = usage.get("output_tokens", 0)
+        cost    = _calc_cost(model, in_tok, out_tok)
+        log_cost(agent_name, model, in_tok, out_tok, cost, latency_ms)
+        logger.debug(f"[{agent_name}] tokens={in_tok}+{out_tok} cost=${cost:.6f} latency={latency_ms}ms")
+    except Exception as exc:
+        logger.warning(f"[{agent_name}] cost logging failed: {exc}")
+
+
+# ── Node: DataCollector (Haiku) ───────────────────────────────────────────────
+
+def data_collector_node(state: WorkflowState) -> dict:
+    logger.info("[DataCollector] 提取關鍵市場數值")
+    snapshot = state["snapshot"]
+    user_content = f"原始市場快照：\n{json.dumps(snapshot['tools'], ensure_ascii=False, indent=2)}"
+
+    start = time.monotonic()
+    response = _llm(_MODEL_HAIKU).invoke([
+        SystemMessage(content=_COLLECTOR_SYSTEM),
+        HumanMessage(content=user_content),
+    ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage("data_collector", _MODEL_HAIKU, response, latency_ms)
+
+    raw_text = _extract_text(response)
+    try:
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```", 2)[1]
+            raw_text = raw_text[raw_text.index("\n") + 1:] if "\n" in raw_text else raw_text
+        raw_market_data = json.loads(raw_text)
+    except Exception:
+        logger.warning("[DataCollector] JSON 解析失敗，使用空 dict")
+        raw_market_data = {}
+
+    logger.success(f"[DataCollector] 完成 data_ok={raw_market_data.get('data_ok', '?')}")
+    return {"raw_market_data": raw_market_data}
+
+
+# ── Node: ChipAnalyst (Sonnet) ────────────────────────────────────────────────
+
 def chip_analyst_node(state: WorkflowState) -> dict:
     logger.info("[ChipAnalyst] 開始籌碼分析")
-    chip_data = state["snapshot"]["tools"]["get_tw_future_chips"]["data"]
+    raw = state.get("raw_market_data") or {}
+    chip_data = {k: raw[k] for k in ("foreign_oi_net", "trust_oi_net", "dealer_oi_net") if k in raw}
+    if not chip_data:
+        chip_data = state["snapshot"]["tools"]["get_tw_future_chips"]["data"]
     user_content = f"三大法人台指期留倉數據：\n{json.dumps(chip_data, ensure_ascii=False, indent=2)}"
 
-    response = _llm().invoke([
+    start = time.monotonic()
+    response = _llm(_MODEL_SONNET).invoke([
         SystemMessage(content=_CHIP_SYSTEM),
         HumanMessage(content=user_content),
     ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage("chip_analyst", _MODEL_SONNET, response, latency_ms)
 
-    result = response.content.strip()
+    result = _extract_text(response)
     logger.success(f"[ChipAnalyst] 完成：{result[:80]}...")
     return {"chip_report": result}
 
 
+# ── Node: TechnicalAnalyst (Sonnet) ──────────────────────────────────────────
+
 def tech_analyst_node(state: WorkflowState) -> dict:
     logger.info("[TechnicalAnalyst] 開始技術面分析")
-    markets = state["snapshot"]["tools"]["get_us_market_summary"]["data"]["markets"]
-    user_content = f"昨日美股收盤數據：\n{json.dumps(markets, ensure_ascii=False, indent=2)}"
+    raw = state.get("raw_market_data") or {}
+    us_keys = ("djia_chg_pct", "ndx_chg_pct", "sox_chg_pct", "tsm_adr_chg_pct")
+    us_data = {k: raw[k] for k in us_keys if k in raw}
+    if not us_data:
+        us_data = state["snapshot"]["tools"]["get_us_market_summary"]["data"]["markets"]
+    user_content = f"昨日美股收盤數據：\n{json.dumps(us_data, ensure_ascii=False, indent=2)}"
 
-    response = _llm().invoke([
+    start = time.monotonic()
+    response = _llm(_MODEL_SONNET).invoke([
         SystemMessage(content=_TECH_SYSTEM),
         HumanMessage(content=user_content),
     ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage("tech_analyst", _MODEL_SONNET, response, latency_ms)
 
-    result = response.content.strip()
+    result = _extract_text(response)
     logger.success(f"[TechnicalAnalyst] 完成：{result[:80]}...")
     return {"tech_report": result}
 
 
+# ── Node: ChiefStrategist (Opus + Extended Thinking) ─────────────────────────
+
 def chief_strategist_node(state: WorkflowState) -> dict:
-    logger.info("[ChiefStrategist] 整合兩份報告，撰寫投報建議書")
+    logger.info("[ChiefStrategist] 整合兩份報告，撰寫投報建議書（Opus + Extended Thinking）")
     user_content = (
         f"籌碼面報告：\n{state['chip_report']}\n\n"
         f"技術面報告：\n{state['tech_report']}"
     )
 
-    response = _llm().invoke([
+    start = time.monotonic()
+    response = _llm_opus().invoke([
         SystemMessage(content=_CHIEF_SYSTEM),
         HumanMessage(content=user_content),
     ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage("chief_strategist", _MODEL_OPUS, response, latency_ms)
 
-    result = response.content.strip()
+    result = _extract_text(response)
     logger.success("[ChiefStrategist] 建議書撰寫完成")
     return {"final_brief": result}
 
 
+# ── Node: FormatAgent (Haiku) ─────────────────────────────────────────────────
+
+def format_agent_node(state: WorkflowState) -> dict:
+    logger.info("[FormatAgent] 格式化為 LINE 推播格式")
+    user_content = f"原始建議書：\n{state['final_brief']}"
+
+    start = time.monotonic()
+    response = _llm(_MODEL_HAIKU, max_tokens=2048).invoke([
+        SystemMessage(content=_FORMAT_SYSTEM),
+        HumanMessage(content=user_content),
+    ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage("format_agent", _MODEL_HAIKU, response, latency_ms)
+
+    result = _extract_text(response)
+    logger.success("[FormatAgent] LINE 格式化完成")
+    return {"final_report": result}
+
+
+# ── Node: SaveToDB (no LLM) ───────────────────────────────────────────────────
+
 def save_to_db_node(state: WorkflowState) -> dict:
-    """Persist the final brief to TiDB (agent_memory.daily_briefs)."""
     logger.info("[SaveToDB] 寫入 TiDB agent_memory.daily_briefs")
     try:
         from database_tools import save_brief
 
         brief = state["final_brief"]
-        trade_date = date.fromisoformat(
-            state["snapshot"]["timestamp"][:10]
-        )
+        trade_date = date.fromisoformat(state["snapshot"]["timestamp"][:10])
 
-        # Extract gap info from tech_report JSON (strip markdown fences if present)
         gap_pct: Optional[float] = None
         gap_dir: Optional[str] = None
         try:
             raw = state["tech_report"].strip()
             if raw.startswith("```"):
-                raw = raw.split("```", 2)[1]           # drop opening fence + lang tag
+                raw = raw.split("```", 2)[1]
                 raw = raw[raw.index("\n") + 1:] if "\n" in raw else raw
             tech = json.loads(raw)
             gap_pct = float(tech.get("estimated_gap_pct", 0))
