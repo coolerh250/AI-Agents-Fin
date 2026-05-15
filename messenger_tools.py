@@ -13,6 +13,8 @@ load_dotenv()
 
 _LINE_PUSH_API = "https://api.line.me/v2/bot/message/push"
 _TG_API = "https://api.telegram.org/bot{token}/sendMessage"
+_LINE_MAX = 4000
+_TG_MAX = 4096
 
 
 def format_brief(brief_text: str) -> str:
@@ -43,7 +45,7 @@ def send_line(message: str) -> dict:
                 },
                 json={
                     "to": user_id,
-                    "messages": [{"type": "text", "text": message}],
+                    "messages": [{"type": "text", "text": message[:_LINE_MAX]}],
                 },
             )
             resp.raise_for_status()
@@ -62,8 +64,7 @@ def send_telegram(message: str) -> dict:
         with httpx.Client(timeout=10.0) as client:
             resp = client.post(url, json={
                 "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "Markdown",
+                "text": message[:_TG_MAX],
             })
             resp.raise_for_status()
         return {"status": "ok", "channel": "telegram", "http_status": resp.status_code}

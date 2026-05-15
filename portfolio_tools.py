@@ -2,15 +2,17 @@
 portfolio_tools.py
 Personal portfolio helpers: load holdings from TiDB, enrich with live prices via yfinance.
 """
+from typing import Optional
+
 import yfinance as yf
 from loguru import logger
 
 from database_tools import get_portfolio
 
 
-def get_user_portfolio() -> list[dict]:
-    """Return all holdings from user_portfolio table."""
-    return get_portfolio()
+def get_user_portfolio(user_id: Optional[str] = None) -> list[dict]:
+    """Return holdings for a LINE user. user_id=None returns legacy NULL-user records."""
+    return get_portfolio(user_id=user_id)
 
 
 def calculate_pnl(holdings: list[dict]) -> list[dict]:

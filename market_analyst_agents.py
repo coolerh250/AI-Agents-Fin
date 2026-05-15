@@ -9,12 +9,15 @@ import time
 from datetime import date
 from typing import Optional, TypedDict
 
+import anthropic as _anthropic
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
 
 load_dotenv()
+
+_OWNER_LINE_ID: Optional[str] = os.getenv("LINE_USER_ID") or None
 
 _MODEL_HAIKU  = "claude-haiku-4-5-20251001"
 _MODEL_SONNET = "claude-sonnet-4-6"
@@ -111,11 +114,22 @@ _FORMAT_SYSTEM = """你是 LINE 推播格式化 Agent。
 
 # ── LLM factories ─────────────────────────────────────────────────────────────
 
+_RETRY_ERRORS = (
+    _anthropic.RateLimitError,
+    _anthropic.APITimeoutError,
+    _anthropic.APIConnectionError,
+)
+
+
 def _llm(model: str, max_tokens: int = 1024) -> ChatAnthropic:
     return ChatAnthropic(
         model=model,
         api_key=os.getenv("ANTHROPIC_API_KEY"),
         max_tokens=max_tokens,
+    ).with_retry(
+        stop_after_attempt=3,
+        wait_exponential_jitter=True,
+        retry_if_exception_type=_RETRY_ERRORS,
     )
 
 
@@ -123,9 +137,13 @@ def _llm_opus() -> ChatAnthropic:
     return ChatAnthropic(
         model=_MODEL_OPUS,
         api_key=os.getenv("ANTHROPIC_API_KEY"),
-        max_tokens=16000,
+        max_tokens=4096,           # reduced from 16000 for cost control
         thinking={"type": "adaptive"},
         output_config={"effort": "high"},
+    ).with_retry(
+        stop_after_attempt=3,
+        wait_exponential_jitter=True,
+        retry_if_exception_type=_RETRY_ERRORS,
     )
 
 
@@ -262,7 +280,7 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     logger.info("[PortfolioManager] 載入持倉並計算損益")
     from portfolio_tools import get_user_portfolio, calculate_pnl
 
-    holdings = get_user_portfolio()
+    holdings = get_user_portfolio(user_id=_OWNER_LINE_ID)
     if not holdings:
         logger.info("[PortfolioManager] 無持倉資料，略過分析")
         return {"portfolio_advice": ""}
@@ -318,14 +336,17 @@ def format_agent_node(state: WorkflowState) -> dict:
 
 def send_notification_node(state: WorkflowState) -> dict:
     logger.info("[SendNotification] 推播 LINE / Telegram")
-    from messenger_tools import send_brief
+    from messenger_tools import send_line, send_telegram
 
     report = state.get("final_report", "")
     if not report:
         logger.warning("[SendNotification] final_report 為空，略過推播")
         return {}
 
-    results = send_brief(report)
+    results = {
+        "line":     send_line(report),
+        "telegram": send_telegram(report),
+    }
     for channel, res in results.items():
         status = res.get("status")
         if status == "ok":

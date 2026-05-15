@@ -11,6 +11,7 @@ wheels/
 
 # Environment variables
 .env
+.env.gpg
 
 # Runtime output
 market_snapshot.json

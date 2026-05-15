@@ -132,6 +132,8 @@ def main():
     seed_test_portfolio()
 
     snapshot = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    from snapshot_integrity import verify_snapshot
+    verify_snapshot(snapshot)
     logger.info(f"Snapshot loaded: {snapshot['timestamp']}")
 
     for tool_name, tool_data in snapshot["tools"].items():

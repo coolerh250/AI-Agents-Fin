@@ -4,6 +4,7 @@ Streamlit lightweight dashboard for the Taiwan Stock Futures Analysis Team.
 Run: uv run streamlit run dashboard.py --server.port 8501
 """
 import json
+import os
 from datetime import date
 
 import pandas as pd
@@ -21,6 +22,27 @@ from database_tools import (
 )
 
 st.set_page_config(page_title="量化工作室看板", layout="wide")
+
+
+def _require_auth() -> None:
+    """Password gate. Skipped if DASH_PASSWORD is not set (backward-compatible)."""
+    dash_pass = os.getenv("DASH_PASSWORD", "")
+    if not dash_pass:
+        return
+    if st.session_state.get("authenticated"):
+        return
+    st.title("🔐 登入")
+    pwd = st.text_input("密碼", type="password")
+    if st.button("登入"):
+        if pwd == dash_pass:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("密碼錯誤")
+    st.stop()
+
+
+_require_auth()
 st.title("📈 台股期貨量化工作室")
 
 

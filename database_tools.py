@@ -4,6 +4,7 @@ SQLAlchemy/PyMySQL helpers for agent_memory on TiDB.
 """
 import os
 from datetime import date
+from functools import lru_cache
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from sqlalchemy.engine import Engine
 load_dotenv()
 
 
+@lru_cache(maxsize=1)
 def _engine() -> Engine:
     host = os.getenv("TIDB_HOST", "127.0.0.1")
     port = os.getenv("TIDB_PORT", "4000")
@@ -20,7 +22,13 @@ def _engine() -> Engine:
     password = os.getenv("TIDB_PASSWORD", "")
     db = os.getenv("TIDB_DB", "agent_memory")
     url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{db}?charset=utf8mb4"
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=2,
+        connect_args={"connect_timeout": 10, "read_timeout": 30},
+    )
 
 
 def save_brief(
@@ -175,16 +183,49 @@ def ensure_portfolio_table() -> None:
                 quantity         INT           NOT NULL,
                 stop_loss_level  DECIMAL(5,2)  NOT NULL DEFAULT 5.00,
                 strategy_type    VARCHAR(20)   NOT NULL DEFAULT '波段',
+                line_user_id     VARCHAR(50)   NULL DEFAULT NULL,
                 created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uq_stock_entry (stock_id, entry_price)
+                UNIQUE KEY uq_user_stock (line_user_id, stock_id),
+                INDEX idx_line_user (line_user_id)
             )
         """))
+        # Migrate existing table: add line_user_id column if missing
+        for stmt, label in [
+            (
+                "ALTER TABLE user_portfolio "
+                "ADD COLUMN line_user_id VARCHAR(50) NULL DEFAULT NULL",
+                "add line_user_id",
+            ),
+            (
+                "ALTER TABLE user_portfolio ADD INDEX idx_line_user (line_user_id)",
+                "add idx_line_user",
+            ),
+            (
+                "ALTER TABLE user_portfolio DROP INDEX uq_stock_entry",
+                "drop uq_stock_entry",
+            ),
+            (
+                "ALTER TABLE user_portfolio "
+                "ADD UNIQUE KEY uq_user_stock (line_user_id, stock_id)",
+                "add uq_user_stock",
+            ),
+        ]:
+            try:
+                conn.execute(text(stmt))
+            except Exception:
+                pass  # Already applied — expected on subsequent runs
 
 
-def get_portfolio() -> list[dict]:
+def get_portfolio(user_id: Optional[str] = None) -> list[dict]:
+    """Return holdings for a user. user_id=None returns legacy NULL-user records."""
     with _engine().connect() as conn:
         rows = conn.execute(
-            text("SELECT * FROM user_portfolio ORDER BY created_at")
+            text("""
+                SELECT * FROM user_portfolio
+                WHERE (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+                ORDER BY created_at
+            """),
+            {"uid": user_id},
         ).fetchall()
     return [dict(r._mapping) for r in rows]
 
@@ -195,27 +236,49 @@ def add_portfolio_item(
     quantity: int,
     stop_loss_level: float = 5.0,
     strategy_type: str = "波段",
+    user_id: Optional[str] = None,
 ) -> bool:
-    """Insert a new holding. Returns False if (stock_id, entry_price) already exists."""
+    """Insert a new holding. Returns False if (line_user_id, stock_id) already exists."""
     try:
         with _engine().begin() as conn:
             conn.execute(
                 text("""
                     INSERT INTO user_portfolio
-                        (stock_id, entry_price, quantity, stop_loss_level, strategy_type)
-                    VALUES (:sid, :entry, :qty, :sl, :strat)
+                        (stock_id, entry_price, quantity, stop_loss_level, strategy_type, line_user_id)
+                    VALUES (:sid, :entry, :qty, :sl, :strat, :uid)
                 """),
                 {"sid": stock_id, "entry": entry_price, "qty": quantity,
-                 "sl": stop_loss_level, "strat": strategy_type},
+                 "sl": stop_loss_level, "strat": strategy_type, "uid": user_id},
             )
         return True
     except Exception:
         return False
 
 
-def delete_portfolio_item(item_id: int) -> None:
+def delete_portfolio_item(item_id: int, user_id: Optional[str] = None) -> None:
     with _engine().begin() as conn:
-        conn.execute(text("DELETE FROM user_portfolio WHERE id = :id"), {"id": item_id})
+        conn.execute(
+            text("""
+                DELETE FROM user_portfolio
+                WHERE id = :id
+                  AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+            """),
+            {"id": item_id, "uid": user_id},
+        )
+
+
+def delete_portfolio_by_stock(stock_id: str, user_id: Optional[str] = None) -> bool:
+    """Delete a holding by stock_id for a user. Returns True if a row was deleted."""
+    with _engine().begin() as conn:
+        result = conn.execute(
+            text("""
+                DELETE FROM user_portfolio
+                WHERE stock_id = :sid
+                  AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+            """),
+            {"sid": stock_id, "uid": user_id},
+        )
+    return result.rowcount > 0
 
 
 def update_portfolio_item(
@@ -223,6 +286,7 @@ def update_portfolio_item(
     quantity: int,
     stop_loss_level: float,
     strategy_type: str,
+    user_id: Optional[str] = None,
 ) -> None:
     with _engine().begin() as conn:
         conn.execute(
@@ -230,20 +294,69 @@ def update_portfolio_item(
                 UPDATE user_portfolio
                 SET quantity = :qty, stop_loss_level = :sl, strategy_type = :strat
                 WHERE id = :id
+                  AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
             """),
-            {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type, "id": item_id},
+            {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type,
+             "id": item_id, "uid": user_id},
         )
 
 
-def seed_test_portfolio() -> None:
+def update_portfolio_entry_price(
+    stock_id: str,
+    entry_price: float,
+    user_id: Optional[str] = None,
+) -> bool:
+    """Update entry_price for a stock. Returns True if updated."""
     with _engine().begin() as conn:
+        result = conn.execute(
+            text("""
+                UPDATE user_portfolio
+                SET entry_price = :entry
+                WHERE stock_id = :sid
+                  AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+            """),
+            {"entry": entry_price, "sid": stock_id, "uid": user_id},
+        )
+    return result.rowcount > 0
+
+
+def seed_test_portfolio() -> None:
+    owner_id = os.getenv("LINE_USER_ID") or None
+    with _engine().begin() as conn:
+        # Migrate existing NULL records to the owner's LINE user ID
+        if owner_id:
+            # Remove duplicate NULL rows: keep the highest-id row per stock_id
+            conn.execute(text("""
+                DELETE p1 FROM user_portfolio p1
+                INNER JOIN user_portfolio p2
+                    ON p1.stock_id = p2.stock_id
+                    AND p1.line_user_id IS NULL
+                    AND p2.line_user_id IS NULL
+                    AND p1.id < p2.id
+            """))
+            # Remove NULL records that would conflict with owner's existing holdings
+            conn.execute(
+                text("""
+                    DELETE p FROM user_portfolio p
+                    INNER JOIN user_portfolio p2
+                        ON p.stock_id = p2.stock_id AND p2.line_user_id = :uid
+                    WHERE p.line_user_id IS NULL
+                """),
+                {"uid": owner_id},
+            )
+            # Migrate remaining NULL records to the owner
+            conn.execute(
+                text("UPDATE user_portfolio SET line_user_id = :uid WHERE line_user_id IS NULL"),
+                {"uid": owner_id},
+            )
         conn.execute(
             text("""
                 INSERT IGNORE INTO user_portfolio
-                    (stock_id, entry_price, quantity, stop_loss_level, strategy_type)
-                VALUES (:sid, :entry, :qty, :sl, :strat)
+                    (stock_id, entry_price, quantity, stop_loss_level, strategy_type, line_user_id)
+                VALUES (:sid, :entry, :qty, :sl, :strat, :uid)
             """),
-            {"sid": "2330", "entry": 1000.00, "qty": 1000, "sl": 5.00, "strat": "波段"},
+            {"sid": "2330", "entry": 1000.00, "qty": 1000, "sl": 5.00, "strat": "波段",
+             "uid": owner_id},
         )
 
 

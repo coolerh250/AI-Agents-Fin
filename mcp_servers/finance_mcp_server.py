@@ -4,6 +4,7 @@ Financial Data Collector — MCP Server for Taiwan Stock Futures Analysis Team
 Tools: get_tw_future_chips | get_us_market_summary | get_financial_news | save_brief_to_db | send_brief_to_user
 Resources: finance://backtest/report
 """
+import re
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -18,6 +19,22 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
+
+_INJECTION_RE = re.compile(
+    r"(?i)("
+    r"ignore\s+(all\s+)?previous"
+    r"|(system|assistant)\s*:\s*(prompt|message)"
+    r"|override|jailbreak"
+    r"|新的指示|改變系統提示|忽略之前"
+    r")"
+)
+
+
+def _sanitize_title(title: str) -> str:
+    if _INJECTION_RE.search(title):
+        logger.warning(f"[news] filtered suspected injection: {title[:60]}")
+        return "[FILTERED]"
+    return title[:200]
 
 logger.remove()
 logger.add(sys.stderr, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}", level="DEBUG")
@@ -213,7 +230,7 @@ def get_financial_news() -> dict:
         for item in items:
             ts = item.get("publishAt")
             news.append({
-                "title":    item.get("title", ""),
+                "title":    _sanitize_title(item.get("title", "")),
                 "time":     datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None,
                 "category": item.get("categoryName", ""),
                 "url":      f"https://news.cnyes.com/news/id/{item.get('newsId', '')}",

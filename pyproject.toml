@@ -20,4 +20,6 @@ dependencies = [
     "pymysql>=1.1.1",
     "sqlalchemy>=2.0",
     "streamlit>=1.45",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
