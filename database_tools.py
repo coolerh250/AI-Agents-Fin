@@ -2,12 +2,14 @@
 database_tools.py
 SQLAlchemy/PyMySQL helpers for agent_memory on TiDB.
 """
+import json as _json
 import os
 from datetime import date
 from functools import lru_cache
 from typing import Optional
 
 from dotenv import load_dotenv
+from loguru import logger
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -110,11 +112,14 @@ def ensure_cost_logs_table() -> None:
                 model_name         VARCHAR(100)   NOT NULL,
                 input_tokens       INT            NOT NULL DEFAULT 0,
                 output_tokens      INT            NOT NULL DEFAULT 0,
+                thinking_tokens    INT            NOT NULL DEFAULT 0,
                 estimated_cost_usd DECIMAL(10,6)  NOT NULL DEFAULT 0.000000,
                 latency_ms         INT,
+                run_id             VARCHAR(36)    DEFAULT NULL,
                 logged_at          TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
                 INDEX idx_agent (agent_name),
-                INDEX idx_logged_at (logged_at)
+                INDEX idx_logged_at (logged_at),
+                INDEX idx_run_id (run_id)
             )
         """))
 
@@ -124,20 +129,23 @@ def log_cost(
     model_name: str,
     input_tokens: int,
     output_tokens: int,
-    estimated_cost_usd: float,
+    thinking_tokens: int = 0,
+    estimated_cost_usd: float = 0.0,
     latency_ms: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> None:
     with _engine().begin() as conn:
         conn.execute(
             text("""
                 INSERT INTO cost_logs
                     (agent_name, model_name, input_tokens, output_tokens,
-                     estimated_cost_usd, latency_ms)
-                VALUES (:agent, :model, :in_tok, :out_tok, :cost, :lat)
+                     thinking_tokens, estimated_cost_usd, latency_ms, run_id)
+                VALUES (:agent, :model, :in_tok, :out_tok, :think_tok, :cost, :lat, :run_id)
             """),
             {"agent": agent_name, "model": model_name,
              "in_tok": input_tokens, "out_tok": output_tokens,
-             "cost": estimated_cost_usd, "lat": latency_ms},
+             "think_tok": thinking_tokens, "cost": estimated_cost_usd,
+             "lat": latency_ms, "run_id": run_id},
         )
 
 
@@ -146,6 +154,7 @@ def get_cost_summary(days: int = 30) -> list[dict]:
         SELECT agent_name, model_name,
                SUM(input_tokens)       AS total_input,
                SUM(output_tokens)      AS total_output,
+               SUM(thinking_tokens)    AS total_thinking,
                SUM(estimated_cost_usd) AS total_cost_usd,
                AVG(latency_ms)         AS avg_latency_ms,
                COUNT(*)                AS runs
@@ -257,6 +266,10 @@ def add_portfolio_item(
 
 def delete_portfolio_item(item_id: int, user_id: Optional[str] = None) -> None:
     with _engine().begin() as conn:
+        before_row = conn.execute(
+            text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
+        ).fetchone()
+        before = dict(before_row._mapping) if before_row else {}
         conn.execute(
             text("""
                 DELETE FROM user_portfolio
@@ -265,6 +278,7 @@ def delete_portfolio_item(item_id: int, user_id: Optional[str] = None) -> None:
             """),
             {"id": item_id, "uid": user_id},
         )
+    log_audit("user_portfolio", "DELETE", item_id, "dashboard", before=before)
 
 
 def delete_portfolio_by_stock(stock_id: str, user_id: Optional[str] = None) -> bool:
@@ -289,6 +303,10 @@ def update_portfolio_item(
     user_id: Optional[str] = None,
 ) -> None:
     with _engine().begin() as conn:
+        before_row = conn.execute(
+            text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
+        ).fetchone()
+        before = dict(before_row._mapping) if before_row else {}
         conn.execute(
             text("""
                 UPDATE user_portfolio
@@ -299,6 +317,11 @@ def update_portfolio_item(
             {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type,
              "id": item_id, "uid": user_id},
         )
+        after_row = conn.execute(
+            text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
+        ).fetchone()
+        after = dict(after_row._mapping) if after_row else {}
+    log_audit("user_portfolio", "UPDATE", item_id, "dashboard", before=before, after=after)
 
 
 def update_portfolio_entry_price(
@@ -369,6 +392,318 @@ def get_recent_accuracy(days: int = 5) -> list[dict]:
         LEFT JOIN market_actuals a ON b.trade_date = a.trade_date
         ORDER BY b.trade_date DESC
         LIMIT :days
+    """
+    with _engine().connect() as conn:
+        rows = conn.execute(text(sql), {"days": days}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+# ── Observability tables ───────────────────────────────────────────────────────
+
+def ensure_observability_tables() -> None:
+    """Create observability tables and migrate cost_logs if needed. Idempotent."""
+    with _engine().begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                id                   VARCHAR(36)   NOT NULL,
+                run_type             VARCHAR(20)   NOT NULL DEFAULT 'investment',
+                status               VARCHAR(20)   NOT NULL DEFAULT 'running',
+                started_at           TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ended_at             TIMESTAMP     NULL,
+                snapshot_ts          VARCHAR(40)   NULL,
+                snapshot_age_seconds INT           NULL,
+                total_cost_usd       DECIMAL(10,6) NOT NULL DEFAULT 0.000000,
+                error_message        TEXT          NULL,
+                PRIMARY KEY (id),
+                INDEX idx_wr_status (status),
+                INDEX idx_wr_started (started_at),
+                INDEX idx_wr_type_date (run_type, started_at)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS workflow_events (
+                id         BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                run_id     VARCHAR(36)   NOT NULL,
+                event_type VARCHAR(50)   NOT NULL,
+                node_name  VARCHAR(50)   NULL,
+                detail     JSON          NULL,
+                severity   VARCHAR(10)   NOT NULL DEFAULT 'info',
+                created_at TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_we_run (run_id),
+                INDEX idx_we_type (event_type),
+                INDEX idx_we_severity (severity),
+                INDEX idx_we_created (created_at)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS llm_traces (
+                id              BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                run_id          VARCHAR(36)   NOT NULL,
+                agent_name      VARCHAR(50)   NOT NULL,
+                model_name      VARCHAR(100)  NOT NULL,
+                system_prompt   TEXT          NULL,
+                user_content    TEXT          NULL,
+                raw_response    TEXT          NULL,
+                finish_reason   VARCHAR(30)   NULL,
+                input_tokens    INT           NOT NULL DEFAULT 0,
+                output_tokens   INT           NOT NULL DEFAULT 0,
+                thinking_tokens INT           NOT NULL DEFAULT 0,
+                latency_ms      INT           NULL,
+                created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_lt_run_agent (run_id, agent_name),
+                INDEX idx_lt_created (created_at)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id          BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                table_name  VARCHAR(50)   NOT NULL,
+                operation   VARCHAR(10)   NOT NULL,
+                record_id   BIGINT        NULL,
+                actor       VARCHAR(50)   NOT NULL DEFAULT 'system',
+                before_json JSON          NULL,
+                after_json  JSON          NULL,
+                created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_al_table_op (table_name, operation),
+                INDEX idx_al_created (created_at)
+            )
+        """))
+
+    # Migrate cost_logs: add thinking_tokens, run_id if missing
+    for stmt, label in [
+        ("ALTER TABLE cost_logs ADD COLUMN thinking_tokens INT NOT NULL DEFAULT 0", "add thinking_tokens"),
+        ("ALTER TABLE cost_logs ADD COLUMN run_id VARCHAR(36) DEFAULT NULL", "add run_id"),
+        ("ALTER TABLE cost_logs ADD INDEX idx_cost_run_id (run_id)", "add idx_cost_run_id"),
+        ("ALTER TABLE daily_briefs ADD UNIQUE KEY uq_trade_date (trade_date)", "add uq_trade_date"),
+    ]:
+        try:
+            with _engine().begin() as conn:
+                conn.execute(text(stmt))
+        except Exception:
+            pass  # Already applied
+
+
+# ── Workflow run lifecycle ─────────────────────────────────────────────────────
+
+def create_workflow_run(
+    run_id: str,
+    run_type: str = "investment",
+    snapshot_ts: Optional[str] = None,
+    snapshot_age_seconds: Optional[int] = None,
+) -> None:
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO workflow_runs (id, run_type, status, snapshot_ts, snapshot_age_seconds)
+                    VALUES (:id, :rtype, 'running', :snap_ts, :snap_age)
+                """),
+                {"id": run_id, "rtype": run_type,
+                 "snap_ts": snapshot_ts, "snap_age": snapshot_age_seconds},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] create_workflow_run failed: {exc}")
+
+
+def finish_workflow_run(
+    run_id: str,
+    status: str,
+    error_message: Optional[str] = None,
+) -> None:
+    try:
+        with _engine().begin() as conn:
+            total = conn.execute(
+                text("SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM cost_logs WHERE run_id = :rid"),
+                {"rid": run_id},
+            ).scalar()
+            conn.execute(
+                text("""
+                    UPDATE workflow_runs
+                    SET status = :status, ended_at = NOW(),
+                        total_cost_usd = :cost, error_message = :err
+                    WHERE id = :id
+                """),
+                {"status": status, "cost": float(total or 0),
+                 "err": error_message, "id": run_id},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] finish_workflow_run failed: {exc}")
+
+
+def get_run_status(run_date: date) -> Optional[dict]:
+    with _engine().connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id, run_type, status, started_at, ended_at,
+                       snapshot_age_seconds, total_cost_usd, error_message
+                FROM workflow_runs
+                WHERE DATE(started_at) = :d AND run_type = 'investment'
+                ORDER BY started_at DESC LIMIT 1
+            """),
+            {"d": run_date},
+        ).fetchone()
+    return dict(row._mapping) if row else None
+
+
+def get_workflow_runs(days: int = 30) -> list[dict]:
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, run_type, status, started_at, ended_at,
+                       snapshot_age_seconds, total_cost_usd, error_message
+                FROM workflow_runs
+                WHERE started_at >= NOW() - INTERVAL :days DAY
+                ORDER BY started_at DESC
+            """),
+            {"days": days},
+        ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+# ── Event log ─────────────────────────────────────────────────────────────────
+
+def log_event(
+    run_id: str,
+    event_type: str,
+    node_name: Optional[str] = None,
+    detail: Optional[dict] = None,
+    severity: str = "info",
+) -> None:
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO workflow_events
+                        (run_id, event_type, node_name, detail, severity)
+                    VALUES (:run_id, :etype, :node, :detail, :sev)
+                """),
+                {"run_id": run_id, "etype": event_type, "node": node_name,
+                 "detail": _json.dumps(detail or {}, ensure_ascii=False),
+                 "sev": severity},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] log_event failed: {exc}")
+
+
+def get_run_events(run_id: str) -> list[dict]:
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM workflow_events WHERE run_id = :rid ORDER BY created_at"),
+            {"rid": run_id},
+        ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+def get_recent_events(
+    days: int = 7,
+    severity_filter: Optional[list] = None,
+) -> list[dict]:
+    base = "SELECT * FROM workflow_events WHERE created_at >= NOW() - INTERVAL :days DAY"
+    params: dict = {"days": days}
+    if severity_filter:
+        placeholders = ", ".join(f":sev{i}" for i in range(len(severity_filter)))
+        base += f" AND severity IN ({placeholders})"
+        for i, s in enumerate(severity_filter):
+            params[f"sev{i}"] = s
+    base += " ORDER BY created_at DESC LIMIT 500"
+    with _engine().connect() as conn:
+        rows = conn.execute(text(base), params).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+# ── LLM trace ─────────────────────────────────────────────────────────────────
+
+def log_llm_trace(
+    run_id: str,
+    agent_name: str,
+    model_name: str,
+    system_prompt: str,
+    user_content: str,
+    raw_response: str,
+    finish_reason: Optional[str],
+    input_tokens: int,
+    output_tokens: int,
+    thinking_tokens: int,
+    latency_ms: int,
+) -> None:
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO llm_traces
+                        (run_id, agent_name, model_name, system_prompt, user_content,
+                         raw_response, finish_reason, input_tokens, output_tokens,
+                         thinking_tokens, latency_ms)
+                    VALUES (:run_id, :agent, :model, :sys, :usr, :resp,
+                            :fin, :in_tok, :out_tok, :think_tok, :lat)
+                """),
+                {"run_id": run_id, "agent": agent_name, "model": model_name,
+                 "sys": (system_prompt or "")[:4000],
+                 "usr": (user_content or "")[:4000],
+                 "resp": (raw_response or "")[:8000],
+                 "fin": finish_reason,
+                 "in_tok": input_tokens, "out_tok": output_tokens,
+                 "think_tok": thinking_tokens, "lat": latency_ms},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] log_llm_trace failed: {exc}")
+
+
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+def log_audit(
+    table_name: str,
+    operation: str,
+    record_id: Optional[int],
+    actor: str = "system",
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+) -> None:
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO audit_log
+                        (table_name, operation, record_id, actor, before_json, after_json)
+                    VALUES (:tbl, :op, :rid, :actor, :before, :after)
+                """),
+                {"tbl": table_name, "op": operation, "rid": record_id, "actor": actor,
+                 "before": _json.dumps(before, default=str) if before else None,
+                 "after":  _json.dumps(after,  default=str) if after  else None},
+            )
+    except Exception as exc:
+        logger.warning(f"[telemetry] log_audit failed: {exc}")
+
+
+# ── Cost queries (extended) ────────────────────────────────────────────────────
+
+def get_run_cost(run_id: str) -> float:
+    with _engine().connect() as conn:
+        val = conn.execute(
+            text("SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM cost_logs WHERE run_id = :rid"),
+            {"rid": run_id},
+        ).scalar()
+    return float(val or 0)
+
+
+def get_per_run_cost_summary(days: int = 30) -> list[dict]:
+    sql = """
+        SELECT wr.id AS run_id,
+               DATE(wr.started_at)        AS trade_date,
+               wr.status,
+               wr.total_cost_usd,
+               wr.snapshot_age_seconds,
+               COALESCE(SUM(cl.thinking_tokens), 0)  AS total_thinking_tokens,
+               COALESCE(MAX(CASE WHEN cl.agent_name = 'chief_strategist'
+                           THEN cl.thinking_tokens END), 0) AS opus_thinking_tokens,
+               TIMESTAMPDIFF(SECOND, wr.started_at, wr.ended_at) AS duration_seconds
+        FROM workflow_runs wr
+        LEFT JOIN cost_logs cl ON wr.id = cl.run_id
+        WHERE wr.run_type = 'investment'
+          AND wr.started_at >= NOW() - INTERVAL :days DAY
+        GROUP BY wr.id, wr.started_at, wr.status, wr.total_cost_usd,
+                 wr.snapshot_age_seconds, wr.ended_at
+        ORDER BY wr.started_at DESC
     """
     with _engine().connect() as conn:
         rows = conn.execute(text(sql), {"days": days}).fetchall()

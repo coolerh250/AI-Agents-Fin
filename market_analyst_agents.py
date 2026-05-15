@@ -31,6 +31,7 @@ _PRICING = {  # USD per 1M tokens
 
 
 class WorkflowState(TypedDict):
+    run_id:           str             # UUID correlation key — set in investment_workflow.main()
     snapshot:         dict
     raw_market_data:  dict            # compact summary from data_collector
     chip_report:      str
@@ -149,11 +150,6 @@ def _llm_opus() -> ChatAnthropic:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _calc_cost(model: str, input_tok: int, output_tok: int) -> float:
-    p = _PRICING[model]
-    return (input_tok * p["input"] + output_tok * p["output"]) / 1_000_000
-
-
 def _extract_text(response) -> str:
     c = response.content
     if isinstance(c, str):
@@ -163,22 +159,33 @@ def _extract_text(response) -> str:
     ).strip()
 
 
-def _record_usage(agent_name: str, model: str, response, latency_ms: int) -> None:
-    try:
-        from database_tools import log_cost
-        usage = response.usage_metadata or {}
-        in_tok  = usage.get("input_tokens", 0)
-        out_tok = usage.get("output_tokens", 0)
-        cost    = _calc_cost(model, in_tok, out_tok)
-        log_cost(agent_name, model, in_tok, out_tok, cost, latency_ms)
-        logger.debug(f"[{agent_name}] tokens={in_tok}+{out_tok} cost=${cost:.6f} latency={latency_ms}ms")
-    except Exception as exc:
-        logger.warning(f"[{agent_name}] cost logging failed: {exc}")
+def _record_usage(
+    agent_name: str,
+    model: str,
+    response,
+    latency_ms: int,
+    run_id: Optional[str] = None,
+    system_prompt: str = "",
+    user_content: str = "",
+) -> None:
+    from telemetry import record_usage
+    record_usage(
+        agent_name=agent_name,
+        model=model,
+        response=response,
+        latency_ms=latency_ms,
+        run_id=run_id,
+        system_prompt=system_prompt,
+        user_content=user_content,
+        pricing=_PRICING,
+    )
 
 
 # ── Node: DataCollector (Haiku) ───────────────────────────────────────────────
 
 def data_collector_node(state: WorkflowState) -> dict:
+    from telemetry import emit_event
+    run_id = state.get("run_id")
     logger.info("[DataCollector] 提取關鍵市場數值")
     snapshot = state["snapshot"]
     user_content = f"原始市場快照：\n{json.dumps(snapshot['tools'], ensure_ascii=False, indent=2)}"
@@ -189,7 +196,8 @@ def data_collector_node(state: WorkflowState) -> dict:
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("data_collector", _MODEL_HAIKU, response, latency_ms)
+    _record_usage("data_collector", _MODEL_HAIKU, response, latency_ms,
+                  run_id=run_id, system_prompt=_COLLECTOR_SYSTEM, user_content=user_content)
 
     raw_text = _extract_text(response)
     try:
@@ -200,6 +208,9 @@ def data_collector_node(state: WorkflowState) -> dict:
     except Exception:
         logger.warning("[DataCollector] JSON 解析失敗，使用空 dict")
         raw_market_data = {}
+        emit_event(run_id, "fallback_activated", "data_collector",
+                   {"reason": "json_parse_failed", "raw_text_length": len(raw_text)},
+                   severity="warn")
 
     logger.success(f"[DataCollector] 完成 data_ok={raw_market_data.get('data_ok', '?')}")
     return {"raw_market_data": raw_market_data}
@@ -208,11 +219,17 @@ def data_collector_node(state: WorkflowState) -> dict:
 # ── Node: ChipAnalyst (Sonnet) ────────────────────────────────────────────────
 
 def chip_analyst_node(state: WorkflowState) -> dict:
+    from telemetry import emit_event
+    run_id = state.get("run_id")
     logger.info("[ChipAnalyst] 開始籌碼分析")
     raw = state.get("raw_market_data") or {}
     chip_data = {k: raw[k] for k in ("foreign_oi_net", "trust_oi_net", "dealer_oi_net") if k in raw}
     if not chip_data:
         chip_data = state["snapshot"]["tools"]["get_tw_future_chips"]["data"]
+        emit_event(run_id, "fallback_activated", "chip_analyst",
+                   {"reason": "data_collector_empty",
+                    "raw_bytes": len(json.dumps(chip_data))}, severity="warn")
+        logger.warning(f"[ChipAnalyst] Fallback: raw snapshot {len(json.dumps(chip_data))} bytes")
     user_content = f"三大法人台指期留倉數據：\n{json.dumps(chip_data, ensure_ascii=False, indent=2)}"
 
     start = time.monotonic()
@@ -221,7 +238,8 @@ def chip_analyst_node(state: WorkflowState) -> dict:
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("chip_analyst", _MODEL_SONNET, response, latency_ms)
+    _record_usage("chip_analyst", _MODEL_SONNET, response, latency_ms,
+                  run_id=run_id, system_prompt=_CHIP_SYSTEM, user_content=user_content)
 
     result = _extract_text(response)
     logger.success(f"[ChipAnalyst] 完成：{result[:80]}...")
@@ -231,12 +249,18 @@ def chip_analyst_node(state: WorkflowState) -> dict:
 # ── Node: TechnicalAnalyst (Sonnet) ──────────────────────────────────────────
 
 def tech_analyst_node(state: WorkflowState) -> dict:
+    from telemetry import emit_event
+    run_id = state.get("run_id")
     logger.info("[TechnicalAnalyst] 開始技術面分析")
     raw = state.get("raw_market_data") or {}
     us_keys = ("djia_chg_pct", "ndx_chg_pct", "sox_chg_pct", "tsm_adr_chg_pct")
     us_data = {k: raw[k] for k in us_keys if k in raw}
     if not us_data:
         us_data = state["snapshot"]["tools"]["get_us_market_summary"]["data"]["markets"]
+        emit_event(run_id, "fallback_activated", "tech_analyst",
+                   {"reason": "data_collector_empty",
+                    "raw_bytes": len(json.dumps(us_data))}, severity="warn")
+        logger.warning(f"[TechnicalAnalyst] Fallback: raw snapshot {len(json.dumps(us_data))} bytes")
     user_content = f"昨日美股收盤數據：\n{json.dumps(us_data, ensure_ascii=False, indent=2)}"
 
     start = time.monotonic()
@@ -245,7 +269,8 @@ def tech_analyst_node(state: WorkflowState) -> dict:
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("tech_analyst", _MODEL_SONNET, response, latency_ms)
+    _record_usage("tech_analyst", _MODEL_SONNET, response, latency_ms,
+                  run_id=run_id, system_prompt=_TECH_SYSTEM, user_content=user_content)
 
     result = _extract_text(response)
     logger.success(f"[TechnicalAnalyst] 完成：{result[:80]}...")
@@ -255,6 +280,7 @@ def tech_analyst_node(state: WorkflowState) -> dict:
 # ── Node: ChiefStrategist (Opus + Extended Thinking) ─────────────────────────
 
 def chief_strategist_node(state: WorkflowState) -> dict:
+    run_id = state.get("run_id")
     logger.info("[ChiefStrategist] 整合兩份報告，撰寫投報建議書（Opus + Extended Thinking）")
     user_content = (
         f"籌碼面報告：\n{state['chip_report']}\n\n"
@@ -267,7 +293,8 @@ def chief_strategist_node(state: WorkflowState) -> dict:
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("chief_strategist", _MODEL_OPUS, response, latency_ms)
+    _record_usage("chief_strategist", _MODEL_OPUS, response, latency_ms,
+                  run_id=run_id, system_prompt=_CHIEF_SYSTEM, user_content=user_content)
 
     result = _extract_text(response)
     logger.success("[ChiefStrategist] 建議書撰寫完成")
@@ -277,6 +304,7 @@ def chief_strategist_node(state: WorkflowState) -> dict:
 # ── Node: PortfolioManager (Sonnet) ──────────────────────────────────────────
 
 def portfolio_manager_node(state: WorkflowState) -> dict:
+    run_id = state.get("run_id")
     logger.info("[PortfolioManager] 載入持倉並計算損益")
     from portfolio_tools import get_user_portfolio, calculate_pnl
 
@@ -303,7 +331,8 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("portfolio_manager", _MODEL_SONNET, response, latency_ms)
+    _record_usage("portfolio_manager", _MODEL_SONNET, response, latency_ms,
+                  run_id=run_id, system_prompt=_PORTFOLIO_SYSTEM, user_content=user_content)
 
     result = _extract_text(response)
     logger.success("[PortfolioManager] 持股診斷完成")
@@ -313,6 +342,7 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
 # ── Node: FormatAgent (Haiku) ─────────────────────────────────────────────────
 
 def format_agent_node(state: WorkflowState) -> dict:
+    run_id = state.get("run_id")
     logger.info("[FormatAgent] 格式化為 LINE 推播格式")
     portfolio_section = state.get("portfolio_advice", "")
     user_content = f"原始建議書：\n{state['final_brief']}"
@@ -325,7 +355,8 @@ def format_agent_node(state: WorkflowState) -> dict:
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("format_agent", _MODEL_HAIKU, response, latency_ms)
+    _record_usage("format_agent", _MODEL_HAIKU, response, latency_ms,
+                  run_id=run_id, system_prompt=_FORMAT_SYSTEM, user_content=user_content)
 
     result = _extract_text(response)
     logger.success("[FormatAgent] LINE 格式化完成")
@@ -335,12 +366,16 @@ def format_agent_node(state: WorkflowState) -> dict:
 # ── Node: SendNotification (no LLM) ──────────────────────────────────────────
 
 def send_notification_node(state: WorkflowState) -> dict:
+    from telemetry import emit_event
+    run_id = state.get("run_id")
     logger.info("[SendNotification] 推播 LINE / Telegram")
     from messenger_tools import send_line, send_telegram
 
     report = state.get("final_report", "")
     if not report:
         logger.warning("[SendNotification] final_report 為空，略過推播")
+        emit_event(run_id, "node_failure", "send_notification",
+                   {"reason": "empty_final_report"}, severity="error")
         return {}
 
     results = {
@@ -351,16 +386,22 @@ def send_notification_node(state: WorkflowState) -> dict:
         status = res.get("status")
         if status == "ok":
             logger.success(f"[SendNotification] {channel} 推播成功")
+            emit_event(run_id, "delivery_success", "send_notification",
+                       {"channel": channel}, severity="info")
         elif status == "skipped":
             logger.info(f"[SendNotification] {channel} 略過（{res.get('reason', '')}）")
         else:
             logger.warning(f"[SendNotification] {channel} 推播失敗：{res.get('error', '')}")
+            emit_event(run_id, "delivery_failure", "send_notification",
+                       {"channel": channel, "error": res.get("error", "")}, severity="error")
     return {}
 
 
 # ── Node: SaveToDB (no LLM) ───────────────────────────────────────────────────
 
 def save_to_db_node(state: WorkflowState) -> dict:
+    from telemetry import emit_event
+    run_id = state.get("run_id")
     logger.info("[SaveToDB] 寫入 TiDB agent_memory.daily_briefs")
     try:
         from database_tools import save_brief
@@ -379,11 +420,16 @@ def save_to_db_node(state: WorkflowState) -> dict:
             gap_pct = float(tech.get("estimated_gap_pct", 0))
             gap_dir = tech.get("gap_direction")
         except Exception:
-            pass
+            emit_event(run_id, "output_invalid", "tech_analyst",
+                       {"reason": "json_parse_failed_in_save_to_db"}, severity="warn")
 
         row_id = save_brief(trade_date, brief, gap_pct, gap_dir)
         logger.success(f"[SaveToDB] 寫入成功 row_id={row_id}, date={trade_date}")
+        emit_event(run_id, "node_success", "save_to_db",
+                   {"row_id": row_id, "trade_date": str(trade_date)}, severity="info")
         return {"db_row_id": row_id}
     except Exception as exc:
         logger.error(f"[SaveToDB] 寫入失敗: {exc}")
+        emit_event(run_id, "node_failure", "save_to_db",
+                   {"exception": str(exc)}, severity="error")
         return {"db_row_id": None}

@@ -15,8 +15,11 @@ from database_tools import (
     delete_portfolio_item,
     get_cost_summary,
     get_cost_trend,
+    get_per_run_cost_summary,
     get_portfolio,
     get_recent_accuracy,
+    get_recent_events,
+    get_workflow_runs,
     save_actual,
     update_portfolio_item,
 )
@@ -109,10 +112,12 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_accuracy, tab_cost, tab_portfolio = st.tabs([
+tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events = st.tabs([
     "📊 預測準確度",
     "💰 API 成本分析",
     "💼 個人持倉管理",
+    "🟢 系統健康",
+    "📋 事件日誌",
 ])
 
 
@@ -186,13 +191,15 @@ with tab_accuracy:
 with tab_cost:
     cost_rows  = get_cost_summary(30)
     trend_rows = get_cost_trend(30)
+    run_rows   = get_per_run_cost_summary(30)
 
     if not cost_rows:
         st.info("尚無成本記錄 — 請先執行含成本追蹤的 investment_workflow.py")
     else:
         cost_df = pd.DataFrame(cost_rows)
-        cost_df["total_cost_usd"] = cost_df["total_cost_usd"].astype(float)
-        cost_df["avg_latency_ms"] = cost_df["avg_latency_ms"].astype(float)
+        cost_df["total_cost_usd"]  = cost_df["total_cost_usd"].astype(float)
+        cost_df["avg_latency_ms"]  = cost_df["avg_latency_ms"].astype(float)
+        cost_df["total_thinking"]  = cost_df.get("total_thinking", pd.Series([0]*len(cost_df))).fillna(0).astype(int)
 
         col3, col4 = st.columns(2)
         with col3:
@@ -209,6 +216,12 @@ with tab_cost:
                 st.subheader("每日成本趨勢")
                 st.info("累積不足兩天，趨勢圖待更新")
 
+        # Thinking tokens chart (Opus visibility)
+        thinking_df = cost_df[cost_df["total_thinking"] > 0]
+        if not thinking_df.empty:
+            st.subheader("Opus 思考 Token 分佈（chief_strategist）")
+            st.bar_chart(thinking_df.set_index("agent_name")["total_thinking"])
+
         st.subheader("節點效能明細")
         st.dataframe(
             cost_df.rename(columns={
@@ -216,12 +229,36 @@ with tab_cost:
                 "model_name":     "模型",
                 "total_input":    "輸入 Token",
                 "total_output":   "輸出 Token",
+                "total_thinking": "思考 Token",
                 "total_cost_usd": "總成本 (USD)",
                 "avg_latency_ms": "平均耗時 (ms)",
                 "runs":           "執行次數",
             }),
             use_container_width=True,
         )
+
+        # Per-run cost table
+        if run_rows:
+            st.subheader("每次執行成本明細（30 天）")
+            run_df = pd.DataFrame(run_rows)
+            run_df["total_cost_usd"] = run_df["total_cost_usd"].astype(float)
+            run_df["trade_date"]     = pd.to_datetime(run_df["trade_date"]).dt.date
+            over_threshold = run_df["total_cost_usd"] > 0.15
+            if over_threshold.any():
+                st.warning(f"⚠️ {over_threshold.sum()} 次執行成本超過 $0.15 閾值")
+            st.dataframe(
+                run_df[["trade_date", "status", "total_cost_usd",
+                        "opus_thinking_tokens", "snapshot_age_seconds",
+                        "duration_seconds"]].rename(columns={
+                    "trade_date":            "日期",
+                    "status":                "狀態",
+                    "total_cost_usd":        "成本 (USD)",
+                    "opus_thinking_tokens":  "Opus 思考 Token",
+                    "snapshot_age_seconds":  "快照年齡 (秒)",
+                    "duration_seconds":      "執行耗時 (秒)",
+                }),
+                use_container_width=True,
+            )
 
 
 # ── Tab 3: Portfolio Management ───────────────────────────────────────────────
@@ -371,3 +408,93 @@ with tab_portfolio:
                     f"未實現損益 {pnl_series.iloc[-1]:+,.0f} 元"
                 )
                 st.line_chart(hist_df[["收盤價", "成本"]])
+
+
+# ── Tab 4: System Health ──────────────────────────────────────────────────────
+
+with tab_health:
+    runs = get_workflow_runs(30)
+    if not runs:
+        st.warning("尚無 workflow_runs 資料 — 請先執行一次 investment_workflow.py（已升級 schema）")
+    else:
+        runs_df = pd.DataFrame(runs)
+        runs_df["started_at"]    = pd.to_datetime(runs_df["started_at"])
+        runs_df["total_cost_usd"] = runs_df["total_cost_usd"].astype(float)
+        runs_df["trade_date"]    = runs_df["started_at"].dt.date
+
+        _STATUS_ICON = {"success": "🟢", "failed": "🔴", "running": "🟡"}
+        runs_df["狀態"] = runs_df["status"].map(_STATUS_ICON).fillna("⚪")
+
+        success_rate = runs_df["status"].eq("success").mean() * 100
+        avg_cost     = runs_df["total_cost_usd"].mean()
+        over_thresh  = runs_df["total_cost_usd"].gt(0.15).sum()
+
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("執行次數（30 天）", len(runs_df))
+        h2.metric("成功率", f"{success_rate:.1f}%")
+        h3.metric("平均成本 / run", f"${avg_cost:.4f}")
+        h4.metric("超出閾值次數", over_thresh, help="單次成本 > $0.15")
+
+        st.subheader("工作流執行紀錄")
+        st.dataframe(
+            runs_df[["狀態", "trade_date", "total_cost_usd",
+                     "snapshot_age_seconds", "error_message"]].rename(columns={
+                "trade_date":            "日期",
+                "total_cost_usd":        "成本 (USD)",
+                "snapshot_age_seconds":  "快照年齡 (秒)",
+                "error_message":         "錯誤訊息",
+            }),
+            use_container_width=True,
+        )
+
+        # Cost over time
+        if len(runs_df) > 1:
+            st.subheader("每次執行成本走勢")
+            chart_df = runs_df[runs_df["status"] == "success"][["trade_date", "total_cost_usd"]].copy()
+            chart_df = chart_df.set_index("trade_date").sort_index()
+            st.line_chart(chart_df)
+
+
+# ── Tab 5: Event Log ──────────────────────────────────────────────────────────
+
+with tab_events:
+    ev_col1, ev_col2 = st.columns([1, 4])
+    with ev_col1:
+        sev_filter = st.multiselect(
+            "嚴重程度", ["info", "warn", "error"],
+            default=["warn", "error"],
+        )
+        ev_days = st.slider("查詢天數", 1, 30, 7)
+
+    events = get_recent_events(days=ev_days, severity_filter=sev_filter or None)
+
+    if not events:
+        st.success(f"最近 {ev_days} 天無符合條件的事件")
+    else:
+        ev_df = pd.DataFrame(events)
+        ev_df["created_at"] = pd.to_datetime(ev_df["created_at"])
+
+        _SEV_ICON = {"error": "🔴", "warn": "🟡", "info": "🔵"}
+        ev_df["●"] = ev_df["severity"].map(_SEV_ICON).fillna("⚪")
+
+        e1, e2, e3 = st.columns(3)
+        e1.metric("事件總計", len(ev_df))
+        e2.metric("錯誤", ev_df["severity"].eq("error").sum())
+        e3.metric("警告", ev_df["severity"].eq("warn").sum())
+
+        # Detail column: pretty-print JSON
+        ev_df["detail_str"] = ev_df["detail"].apply(
+            lambda d: str(d)[:120] if d else ""
+        )
+
+        st.dataframe(
+            ev_df[["●", "created_at", "event_type", "node_name",
+                   "run_id", "detail_str"]].rename(columns={
+                "created_at": "時間",
+                "event_type": "事件類型",
+                "node_name":  "節點",
+                "run_id":     "Run ID",
+                "detail_str": "詳情",
+            }),
+            use_container_width=True,
+        )
