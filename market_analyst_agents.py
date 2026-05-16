@@ -64,7 +64,7 @@ _CHIP_SYSTEM = """你是台灣期貨市場籌碼專家。根據三大法人留�
 - 外資 oi_net > 0 → 偏多
 - 若投信 oi_net > 20,000 且外資偏空 → 籌碼面反向指標（法人分歧）
 嚴格以 JSON 格式回應（不要加 markdown code block）：
-{"sentiment": str, "foreign_net": int, "trust_net": int, "dealer_net": int, "divergence_signal": bool, "reasoning": str}"""
+{"sentiment": str, "foreign_oi_net": int, "trust_net": int, "dealer_net": int, "divergence_signal": bool, "reasoning": str}"""
 
 _TECH_SYSTEM = """你是台股技術面專家，根據前一日美股表現預測今日台股開盤跳空方向與力道。
 參考指標（對台股的影響權重）：

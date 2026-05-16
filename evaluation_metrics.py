@@ -101,7 +101,7 @@ def eval_chip_analyst(text: str) -> dict:
             missing_fields.append("divergence_signal")
 
         # Hallucination: divergence_signal=True but foreign OI is positive (same direction)
-        foreign_net = parsed.get("foreign_net") or parsed.get("foreign_oi_net")
+        foreign_net = parsed.get("foreign_oi_net") or parsed.get("foreign_net")
         if divergence_signal is True and isinstance(foreign_net, (int, float)) and foreign_net > 0:
             hallucination_flags.append("divergence_conflict")
 
