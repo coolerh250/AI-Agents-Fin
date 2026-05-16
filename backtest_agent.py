@@ -150,11 +150,13 @@ def save_accuracy_node(state: BacktestState) -> dict:
     direction_correct: Optional[int] = None
     quality_score: Optional[float] = None
 
-    dir_m = _re.search(r"方向準確[：:]\s*(是|否)", report)
+    # Handle both "方向準確：是" and markdown table "| **方向準確** | ✓ **是** |"
+    dir_m = _re.search(r"方向準確[^是否\n]{0,30}(是|否)", report)
     if dir_m:
         direction_correct = 1 if dir_m.group(1) == "是" else 0
 
-    score_m = _re.search(r"綜合評分[：:]\s*(\d+(?:\.\d+)?)", report)
+    # Handle both "綜合評分：65" and markdown table "| **綜合評分** | **65/100** |"
+    score_m = _re.search(r"綜合評分[^0-9\n]{0,30}(\d+)\s*(?:/\s*100)?", report)
     if score_m:
         quality_score = float(score_m.group(1))
 
