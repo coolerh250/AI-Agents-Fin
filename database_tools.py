@@ -39,13 +39,17 @@ def save_brief(
     predicted_gap_pct: Optional[float],
     gap_direction: Optional[str],
 ) -> int:
-    """Insert a daily brief. Returns the new row id."""
+    """Upsert daily brief (one per trade_date). Returns the row id."""
     with _engine().begin() as conn:
         result = conn.execute(
             text("""
                 INSERT INTO daily_briefs
                     (trade_date, brief_text, predicted_gap_pct, gap_direction)
                 VALUES (:d, :brief, :gap_pct, :direction)
+                ON DUPLICATE KEY UPDATE
+                    brief_text        = VALUES(brief_text),
+                    predicted_gap_pct = VALUES(predicted_gap_pct),
+                    gap_direction     = VALUES(gap_direction)
             """),
             {"d": trade_date, "brief": brief_text,
              "gap_pct": predicted_gap_pct, "direction": gap_direction},

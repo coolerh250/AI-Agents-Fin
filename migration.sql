@@ -158,3 +158,9 @@ CREATE TABLE IF NOT EXISTS strategy_lessons (
 
 -- Step 10: Add lesson_quality_score to strategy_lessons (Flywheel Phase 2)
 ALTER TABLE strategy_lessons ADD COLUMN IF NOT EXISTS lesson_quality_score DECIMAL(3,1) NULL;
+
+-- Step 11: Fix daily_briefs unique key (Step 6 was non-unique; replace it)
+-- Idempotent: DROP ignores error if not exists; ADD UNIQUE uses IF NOT EXISTS
+-- Run manually if needed; ensure_observability_tables() handles this automatically.
+ALTER TABLE daily_briefs DROP INDEX IF EXISTS idx_trade_date;
+ALTER TABLE daily_briefs ADD UNIQUE KEY IF NOT EXISTS uq_db_trade_date (trade_date);
