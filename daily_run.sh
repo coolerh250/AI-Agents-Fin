@@ -34,4 +34,15 @@ else:
     print("⚠️  今日建議書不存在，略過推播")
 PYEOF
 
+echo "[$(ts)] Step 4: Agent 品質評估"
+uv run python evaluation_runner.py || echo "⚠️  evaluation_runner 失敗（略過）"
+
+echo "[$(ts)] Step 5: 清除過期策略教訓"
+uv run python - <<'PYEOF'
+from database_tools import cleanup_expired_lessons
+n = cleanup_expired_lessons()
+if n:
+    print(f"已歸檔 {n} 筆過期 strategy_lessons")
+PYEOF
+
 echo "[$(ts)] ===== daily run 完成 ====="

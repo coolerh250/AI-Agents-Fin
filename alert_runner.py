@@ -15,6 +15,7 @@ Alerts implemented:
   A-007  Opus thinking token spike (> 2048)          WARNING  → Telegram
   A-008  data_collector fallback rate > 20%          INFO     → Telegram
   A-009  Backtest direction accuracy < 40%           INFO     → Telegram
+  A-010  Brief quality score drop > 20% week-over-week WARNING → Telegram
 """
 import argparse
 import sys
@@ -188,6 +189,48 @@ def check_a009() -> None:
         )
 
 
+# ── A-010: Brief quality score drop > 20% week-over-week (weekly) ────────────
+
+def check_a010() -> None:
+    from database_tools import _engine
+    from sqlalchemy import text
+    with _engine().connect() as conn:
+        row = conn.execute(text("""
+            SELECT
+                AVG(CASE WHEN trade_date >= CURDATE() - INTERVAL 7 DAY
+                         THEN brief_quality_score END) AS this_week,
+                AVG(CASE WHEN trade_date >= CURDATE() - INTERVAL 14 DAY
+                         AND trade_date < CURDATE() - INTERVAL 7 DAY
+                         THEN brief_quality_score END) AS last_week,
+                COUNT(CASE WHEN trade_date >= CURDATE() - INTERVAL 7 DAY
+                           THEN 1 END) AS this_week_n,
+                COUNT(CASE WHEN trade_date >= CURDATE() - INTERVAL 14 DAY
+                           AND trade_date < CURDATE() - INTERVAL 7 DAY
+                           THEN 1 END) AS last_week_n
+            FROM eval_runs
+            WHERE trade_date >= CURDATE() - INTERVAL 14 DAY
+              AND status = 'success'
+              AND brief_quality_score IS NOT NULL
+        """)).fetchone()
+
+    if not row or row[0] is None or row[1] is None:
+        return
+    if int(row[2] or 0) < 2 or int(row[3] or 0) < 2:
+        return  # Not enough data for a meaningful comparison
+
+    this_week = float(row[0])
+    last_week = float(row[1])
+    drop_pct = (last_week - this_week) / last_week * 100 if last_week > 0 else 0
+
+    if drop_pct > 20:
+        _send_warning(
+            f"⚠️ [A-010] 建議書品質分數週對週下降 {drop_pct:.0f}%\n"
+            f"本週均分：{this_week:.1f} ({int(row[2])} 筆)\n"
+            f"上週均分：{last_week:.1f} ({int(row[3])} 筆)\n"
+            f"請檢查 evaluation_runner.py 或 LLM 輸出品質"
+        )
+
+
 # ── Weekly digest ─────────────────────────────────────────────────────────────
 
 def send_weekly_digest() -> None:
@@ -237,6 +280,7 @@ def main() -> None:
         logger.info("[AlertRunner] Running weekly checks")
         check_a008()
         check_a009()
+        check_a010()
         send_weekly_digest()
 
     logger.info("[AlertRunner] Done")
