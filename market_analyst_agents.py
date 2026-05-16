@@ -20,8 +20,9 @@ load_dotenv()
 _OWNER_LINE_ID: Optional[str] = os.getenv("LINE_USER_ID") or None
 
 # Phase 3: context size limits (chars) to guard against runaway input
-_CTX_LIMIT_CHIEF_HISTORY_CHARS = 800   # max chars for injected SQL history
-_CTX_LIMIT_PORTFOLIO_CHARS     = 3000  # max chars for portfolio PnL block
+_CTX_LIMIT_CHIEF_HISTORY_CHARS  = 800   # max chars for injected SQL history
+_CTX_LIMIT_CHIEF_LESSONS_CHARS  = 600   # max chars for strategy lessons context
+_CTX_LIMIT_PORTFOLIO_CHARS      = 3000  # max chars for portfolio PnL block
 
 _MODEL_HAIKU  = "claude-haiku-4-5-20251001"
 _MODEL_SONNET = "claude-sonnet-4-6"
@@ -300,6 +301,19 @@ def chief_strategist_node(state: WorkflowState) -> dict:
             user_content += f"\n\n{history}"
     except Exception as exc:
         logger.debug(f"[ChiefStrategist] 歷史上下文載入失敗（略過）: {exc}")
+
+    # Adaptive Flywheel Phase 1: inject regime-matched strategy lessons
+    try:
+        from lesson_retriever import get_lesson_context
+        lessons = get_lesson_context(
+            state.get("raw_market_data") or {},
+            limit=3,
+            max_chars=_CTX_LIMIT_CHIEF_LESSONS_CHARS,
+        )
+        if lessons:
+            user_content += f"\n\n{lessons}"
+    except Exception as exc:
+        logger.debug(f"[ChiefStrategist] strategy lessons 載入失敗（略過）: {exc}")
 
     start = time.monotonic()
     response = _llm_opus().invoke([

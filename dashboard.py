@@ -15,6 +15,10 @@ from database_tools import (
     delete_portfolio_item,
     get_cost_summary,
     get_cost_trend,
+    get_eval_agent_avg_scores,
+    get_eval_dashboard_kpis,
+    get_eval_results,
+    get_eval_runs,
     get_per_run_cost_summary,
     get_portfolio,
     get_recent_accuracy,
@@ -112,12 +116,13 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events = st.tabs([
+tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events, tab_eval = st.tabs([
     "📊 預測準確度",
     "💰 API 成本分析",
     "💼 個人持倉管理",
     "🟢 系統健康",
     "📋 事件日誌",
+    "📝 評估",
 ])
 
 
@@ -498,3 +503,72 @@ with tab_events:
             }),
             use_container_width=True,
         )
+
+# ── Tab 6: Evaluation ─────────────────────────────────────────────────────────
+
+with tab_eval:
+    st.subheader("Agent 品質評估")
+
+    kpis = get_eval_dashboard_kpis(30)
+
+    if not kpis:
+        st.info("尚無評估記錄。執行 evaluation_runner.py 或 backtest_agent.py 後將自動填入。")
+    else:
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("評估次數（30 天）", kpis.get("eval_count", 0))
+        e2.metric("平均品質分", f"{kpis.get('avg_quality_score', 0.0):.1f} / 100")
+        e3.metric("方向準確率", f"{kpis.get('direction_accuracy_pct', 0.0):.1f}%")
+        e4.metric("Schema 通過率", f"{kpis.get('schema_pass_rate', 0.0):.1f}%")
+
+    st.divider()
+
+    # Bar chart: per-agent average quality score
+    agent_avg = get_eval_agent_avg_scores(20)
+    if agent_avg:
+        st.subheader("各代理平均品質分（近 20 次評估）")
+        avg_df = pd.DataFrame(agent_avg).set_index("agent_name")
+        st.bar_chart(avg_df["avg_score"])
+
+    # Detailed table: last 20 eval runs
+    st.subheader("近 20 次評估明細")
+    eval_run_rows = get_eval_runs(60)[:20]
+
+    if not eval_run_rows:
+        st.info("無評估記錄。")
+    else:
+        run_ids = [int(r["id"]) for r in eval_run_rows]
+        result_rows = get_eval_results(run_ids)
+
+        # Pivot result_rows → {eval_run_id: {agent_name: quality_score}}
+        pivot: dict = {}
+        for rr in result_rows:
+            rid = int(rr["eval_run_id"])
+            pivot.setdefault(rid, {})[str(rr["agent_name"])] = rr["quality_score"]
+
+        display = []
+        for r in eval_run_rows:
+            rid = int(r["id"])
+            scores = pivot.get(rid, {})
+            dc = r.get("direction_correct")
+            display.append({
+                "日期":          str(r["trade_date"]),
+                "觸發":          r.get("triggered_by", "—"),
+                "品質分":        r.get("brief_quality_score"),
+                "方向":          (
+                    "✅" if dc == 1 else
+                    "❌" if dc == 0 else "—"
+                ),
+                "預測→實際":     (
+                    f"{r.get('predicted_direction','?')}→{r.get('actual_direction','?')}"
+                    if r.get("predicted_direction") else "—"
+                ),
+                "data_collector":    scores.get("data_collector"),
+                "chip_analyst":      scores.get("chip_analyst"),
+                "tech_analyst":      scores.get("tech_analyst"),
+                "chief_strategist":  scores.get("chief_strategist"),
+                "format_agent":      scores.get("format_agent"),
+                "backtest":          scores.get("backtest_evaluator"),
+            })
+
+        eval_display_df = pd.DataFrame(display)
+        st.dataframe(eval_display_df, use_container_width=True)

@@ -89,3 +89,69 @@ CREATE TABLE IF NOT EXISTS audit_log (
 -- Prevents duplicate rows from double-runs.
 -- Applied with try/except in Python (may already exist).
 ALTER TABLE daily_briefs ADD UNIQUE KEY uq_trade_date (trade_date);
+
+-- Step 7: eval_runs — one row per evaluation session (per trade_date)
+-- -------------------------------------------------------
+-- Created automatically by ensure_eval_tables() in database_tools.py
+-- UNIQUE on trade_date: re-run same day → ON DUPLICATE KEY UPDATE
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+    trade_date          DATE          NOT NULL,
+    run_id_ref          VARCHAR(36)   NULL,
+    triggered_by        VARCHAR(30)   NOT NULL DEFAULT 'manual',
+    status              VARCHAR(20)   NOT NULL DEFAULT 'success',
+    brief_quality_score DECIMAL(5,2)  NULL,
+    direction_correct   TINYINT       NULL,
+    predicted_direction VARCHAR(10)   NULL,
+    actual_direction    VARCHAR(10)   NULL,
+    completed_at        TIMESTAMP     NULL,
+    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_er_trade_date (trade_date),
+    INDEX idx_er_run_ref (run_id_ref)
+);
+
+-- Step 8: eval_results — one row per agent per eval_run
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS eval_results (
+    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+    eval_run_id         BIGINT        NOT NULL,
+    trade_date          DATE          NOT NULL,
+    agent_name          VARCHAR(50)   NOT NULL,
+    quality_score       DECIMAL(5,2)  NULL,
+    schema_valid        TINYINT       NULL,
+    missing_fields      JSON          NULL,
+    hallucination_flags JSON          NULL,
+    extra_metrics       JSON          NULL,
+    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_evr_eval_run   (eval_run_id),
+    INDEX idx_evr_agent_date (agent_name, trade_date)
+);
+
+-- Step 9: strategy_lessons — adaptive flywheel learning store
+-- -------------------------------------------------------
+-- One row per trade_date (UNIQUE). Lessons expire after 90 days via expires_at.
+-- Created automatically by ensure_strategy_lessons_table() in database_tools.py
+CREATE TABLE IF NOT EXISTS strategy_lessons (
+    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+    trade_date          DATE          NOT NULL,
+    eval_run_id         BIGINT        NULL,
+    error_type          VARCHAR(30)   NOT NULL,
+    lesson_text         TEXT          NOT NULL,
+    direction_correct   TINYINT       NOT NULL DEFAULT 0,
+    predicted_direction VARCHAR(10)   NULL,
+    actual_direction    VARCHAR(10)   NULL,
+    predicted_gap_pct   DECIMAL(6,3)  NULL,
+    actual_gap_pct      DECIMAL(6,3)  NULL,
+    gap_error_abs       DECIMAL(6,3)  NULL,
+    composite_score     DECIMAL(5,2)  NULL,
+    regime_sox          VARCHAR(10)   NULL,
+    regime_foreign_oi   VARCHAR(10)   NULL,
+    divergence_signal   TINYINT       NULL,
+    is_active           TINYINT       NOT NULL DEFAULT 1,
+    expires_at          DATE          NULL,
+    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_sl_trade_date  (trade_date),
+    INDEX idx_sl_error_type      (error_type),
+    INDEX idx_sl_regime          (regime_sox, regime_foreign_oi),
+    INDEX idx_sl_active_date     (is_active, trade_date DESC)
+);

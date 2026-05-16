@@ -139,16 +139,107 @@ def evaluate_node(state: BacktestState) -> dict:
     return {"accuracy_report": report}
 
 
+def save_accuracy_node(state: BacktestState) -> dict:
+    """Persist accuracy_report text + parsed score to eval_runs/eval_results. Fail-silent."""
+    import re as _re
+    report = state.get("accuracy_report", "")
+    if not report or report.startswith("⚠️"):
+        logger.info("[SaveAccuracy] 無有效評估報告，略過寫入")
+        return {}
+
+    direction_correct: Optional[int] = None
+    quality_score: Optional[float] = None
+
+    dir_m = _re.search(r"方向準確[：:]\s*(是|否)", report)
+    if dir_m:
+        direction_correct = 1 if dir_m.group(1) == "是" else 0
+
+    score_m = _re.search(r"綜合評分[：:]\s*(\d+(?:\.\d+)?)", report)
+    if score_m:
+        quality_score = float(score_m.group(1))
+
+    brief_record  = state.get("brief_record") or {}
+    actual_data   = state.get("actual_data") or {}
+    predicted_dir = brief_record.get("gap_direction")
+
+    ag = actual_data.get("actual_gap_pct")
+    actual_dir: Optional[str] = None
+    if ag is not None:
+        try:
+            v = float(ag)
+            actual_dir = "up" if v > 0.3 else ("down" if v < -0.3 else "flat")
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        from database_tools import create_eval_run, save_eval_result
+        from datetime import date as _date
+        td = _date.fromisoformat(state["trade_date"])
+
+        eval_run_id = create_eval_run(
+            trade_date=td,
+            run_id_ref=None,
+            triggered_by="backtest",
+            brief_quality_score=quality_score,
+            direction_correct=direction_correct,
+            predicted_direction=predicted_dir,
+            actual_direction=actual_dir,
+        )
+        if eval_run_id > 0:
+            save_eval_result(
+                eval_run_id=eval_run_id,
+                trade_date=td,
+                agent_name="backtest_evaluator",
+                quality_score=quality_score,
+                schema_valid=True,
+                missing_fields=[],
+                hallucination_flags=[],
+                extra_metrics={
+                    "direction_correct": direction_correct,
+                    "report_length": len(report),
+                },
+            )
+            logger.success(f"[SaveAccuracy] 評估結果已寫入 eval_run_id={eval_run_id}")
+        else:
+            logger.warning("[SaveAccuracy] create_eval_run 返回無效 ID，略過寫入")
+    except Exception as exc:
+        logger.warning(f"[SaveAccuracy] 寫入失敗（略過）: {exc}")
+
+    # Adaptive Flywheel: extract and persist strategy lesson
+    try:
+        from lesson_writer import write_lesson
+        from datetime import date as _date
+        td = _date.fromisoformat(state["trade_date"])
+        ag = actual_data.get("actual_gap_pct")
+        write_lesson(
+            trade_date=td,
+            accuracy_report=report,
+            direction_correct=direction_correct or 0,
+            predicted_direction=predicted_dir,
+            actual_direction=actual_dir,
+            predicted_gap_pct=float(brief_record.get("predicted_gap_pct") or 0),
+            actual_gap_pct=float(ag) if ag is not None else None,
+            composite_score=quality_score,
+            eval_run_id=eval_run_id if eval_run_id > 0 else None,
+        )
+    except Exception as exc:
+        logger.warning(f"[SaveAccuracy] lesson_writer 失敗（略過）: {exc}")
+
+    return {}
+
+
 def build_graph():
     graph = StateGraph(BacktestState)
-    graph.add_node("load_brief",   load_brief_node)
-    graph.add_node("fetch_actual", fetch_actual_node)
-    graph.add_node("evaluate",     evaluate_node)
+    graph.add_node("load_brief",    load_brief_node)
+    graph.add_node("fetch_actual",  fetch_actual_node)
+    graph.add_node("evaluate",      evaluate_node)
+    graph.add_node("save_accuracy", save_accuracy_node)
 
-    graph.add_edge(START,         "load_brief")
-    graph.add_edge("load_brief",  "fetch_actual")
-    graph.add_edge("fetch_actual","evaluate")
-    graph.add_edge("evaluate",    END)
+    graph.add_edge(START,           "load_brief")
+    graph.add_edge("load_brief",    "fetch_actual")
+    graph.add_edge("fetch_actual",  "evaluate")
+    graph.add_edge("evaluate",      "save_accuracy")
+    graph.add_edge("save_accuracy", END)
 
     return graph.compile()
 

@@ -469,8 +469,10 @@ def ensure_observability_tables() -> None:
             )
         """))
 
-    ensure_tool_audit_log_table()   # Phase 2
-    ensure_session_episodes_table() # Phase 4
+    ensure_tool_audit_log_table()       # Phase 2
+    ensure_session_episodes_table()     # Phase 4
+    ensure_eval_tables()                # Evaluation Framework
+    ensure_strategy_lessons_table()     # Adaptive Flywheel Phase 1
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -948,3 +950,415 @@ def log_session_episode(
             )
     except Exception as exc:
         logger.warning(f"[telemetry] log_session_episode failed: {exc}")
+
+
+# ── Evaluation Framework ────────────────────────────────────────────────────────
+
+def ensure_eval_tables() -> None:
+    """Create eval_runs and eval_results tables. Called by ensure_observability_tables()."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS eval_runs (
+                    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    trade_date          DATE          NOT NULL,
+                    run_id_ref          VARCHAR(36)   NULL,
+                    triggered_by        VARCHAR(30)   NOT NULL DEFAULT 'manual',
+                    status              VARCHAR(20)   NOT NULL DEFAULT 'success',
+                    brief_quality_score DECIMAL(5,2)  NULL,
+                    direction_correct   TINYINT       NULL,
+                    predicted_direction VARCHAR(10)   NULL,
+                    actual_direction    VARCHAR(10)   NULL,
+                    completed_at        TIMESTAMP     NULL,
+                    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_er_trade_date (trade_date),
+                    INDEX idx_er_run_ref (run_id_ref)
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS eval_results (
+                    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    eval_run_id         BIGINT        NOT NULL,
+                    trade_date          DATE          NOT NULL,
+                    agent_name          VARCHAR(50)   NOT NULL,
+                    quality_score       DECIMAL(5,2)  NULL,
+                    schema_valid        TINYINT       NULL,
+                    missing_fields      JSON          NULL,
+                    hallucination_flags JSON          NULL,
+                    extra_metrics       JSON          NULL,
+                    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_evr_eval_run   (eval_run_id),
+                    INDEX idx_evr_agent_date (agent_name, trade_date)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_eval_tables failed: {exc}")
+
+
+def create_eval_run(
+    trade_date: date,
+    run_id_ref: Optional[str] = None,
+    triggered_by: str = "manual",
+    brief_quality_score: Optional[float] = None,
+    direction_correct: Optional[int] = None,
+    predicted_direction: Optional[str] = None,
+    actual_direction: Optional[str] = None,
+    status: str = "success",
+) -> int:
+    """Upsert one eval_run row (UNIQUE on trade_date). Returns lastrowid or -1 on error."""
+    try:
+        with _engine().begin() as conn:
+            result = conn.execute(
+                text("""
+                    INSERT INTO eval_runs
+                        (trade_date, run_id_ref, triggered_by, status,
+                         brief_quality_score, direction_correct,
+                         predicted_direction, actual_direction, completed_at)
+                    VALUES
+                        (:td, :rid, :tby, :status, :bqs, :dc, :pd, :ad, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        run_id_ref          = VALUES(run_id_ref),
+                        triggered_by        = VALUES(triggered_by),
+                        status              = VALUES(status),
+                        brief_quality_score = VALUES(brief_quality_score),
+                        direction_correct   = VALUES(direction_correct),
+                        predicted_direction = VALUES(predicted_direction),
+                        actual_direction    = VALUES(actual_direction),
+                        completed_at        = NOW()
+                """),
+                {"td": trade_date, "rid": run_id_ref, "tby": triggered_by,
+                 "status": status, "bqs": brief_quality_score, "dc": direction_correct,
+                 "pd": predicted_direction, "ad": actual_direction},
+            )
+            # For ON DUPLICATE KEY UPDATE, lastrowid returns the existing PK
+            row_id = result.lastrowid
+            if row_id == 0:
+                # Fetch the existing id
+                row = conn.execute(
+                    text("SELECT id FROM eval_runs WHERE trade_date = :td"),
+                    {"td": trade_date},
+                ).fetchone()
+                return int(row[0]) if row else -1
+            return int(row_id)
+    except Exception as exc:
+        logger.warning(f"[eval] create_eval_run failed: {exc}")
+        return -1
+
+
+def save_eval_result(
+    eval_run_id: int,
+    trade_date: date,
+    agent_name: str,
+    quality_score: Optional[float] = None,
+    schema_valid: Optional[bool] = None,
+    missing_fields: Optional[list] = None,
+    hallucination_flags: Optional[list] = None,
+    extra_metrics: Optional[dict] = None,
+) -> None:
+    """Insert one eval_result row. Fail-silent."""
+    import json as _json
+    try:
+        sv = int(schema_valid) if schema_valid is not None else None
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO eval_results
+                        (eval_run_id, trade_date, agent_name, quality_score,
+                         schema_valid, missing_fields, hallucination_flags, extra_metrics)
+                    VALUES
+                        (:erid, :td, :agent, :qs, :sv, :mf, :hf, :em)
+                """),
+                {"erid": eval_run_id, "td": trade_date, "agent": agent_name,
+                 "qs": quality_score, "sv": sv,
+                 "mf": _json.dumps(missing_fields or [], ensure_ascii=False),
+                 "hf": _json.dumps(hallucination_flags or [], ensure_ascii=False),
+                 "em": _json.dumps(extra_metrics or {}, ensure_ascii=False)},
+            )
+    except Exception as exc:
+        logger.warning(f"[eval] save_eval_result failed ({agent_name}): {exc}")
+
+
+def get_eval_runs(days: int = 30) -> list:
+    """Return eval_runs rows ordered by trade_date DESC, up to 50 rows."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT id, trade_date, run_id_ref, triggered_by, status,
+                           brief_quality_score, direction_correct,
+                           predicted_direction, actual_direction, completed_at
+                    FROM eval_runs
+                    WHERE trade_date >= CURDATE() - INTERVAL :days DAY
+                    ORDER BY trade_date DESC
+                    LIMIT 50
+                """),
+                {"days": days},
+            ).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.warning(f"[eval] get_eval_runs failed: {exc}")
+        return []
+
+
+def get_eval_results(eval_run_ids: list) -> list:
+    """Return eval_results rows for the given eval_run_id list."""
+    if not eval_run_ids:
+        return []
+    try:
+        placeholders = ",".join(f":id{i}" for i in range(len(eval_run_ids)))
+        params = {f"id{i}": v for i, v in enumerate(eval_run_ids)}
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text(f"""
+                    SELECT eval_run_id, trade_date, agent_name,
+                           quality_score, schema_valid,
+                           missing_fields, hallucination_flags, extra_metrics
+                    FROM eval_results
+                    WHERE eval_run_id IN ({placeholders})
+                    ORDER BY eval_run_id, agent_name
+                """),
+                params,
+            ).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.warning(f"[eval] get_eval_results failed: {exc}")
+        return []
+
+
+def get_eval_dashboard_kpis(days: int = 30) -> dict:
+    """Return KPI aggregates for the Evaluation dashboard tab."""
+    try:
+        with _engine().connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT
+                        COUNT(*)                              AS eval_count,
+                        AVG(brief_quality_score)              AS avg_quality_score,
+                        SUM(CASE WHEN direction_correct IS NOT NULL THEN 1 ELSE 0 END) AS dc_total,
+                        SUM(COALESCE(direction_correct, 0))   AS dc_correct
+                    FROM eval_runs
+                    WHERE trade_date >= CURDATE() - INTERVAL :days DAY
+                      AND status = 'success'
+                """),
+                {"days": days},
+            ).fetchone()
+
+            eval_count = int(row[0] or 0)
+            avg_quality = float(row[1] or 0.0)
+            dc_total = int(row[2] or 0)
+            dc_correct = int(row[3] or 0)
+            direction_pct = (dc_correct / dc_total * 100) if dc_total > 0 else 0.0
+
+            # Schema pass rate: AVG across all agents
+            schema_row = conn.execute(
+                text("""
+                    SELECT AVG(COALESCE(schema_valid, 0)) AS schema_pass_rate
+                    FROM eval_results evr
+                    JOIN eval_runs er ON evr.eval_run_id = er.id
+                    WHERE er.trade_date >= CURDATE() - INTERVAL :days DAY
+                      AND er.status = 'success'
+                """),
+                {"days": days},
+            ).fetchone()
+            schema_pass = float(schema_row[0] or 0.0) * 100 if schema_row else 0.0
+
+        return {
+            "eval_count": eval_count,
+            "avg_quality_score": round(avg_quality, 1),
+            "direction_accuracy_pct": round(direction_pct, 1),
+            "schema_pass_rate": round(schema_pass, 1),
+        }
+    except Exception as exc:
+        logger.warning(f"[eval] get_eval_dashboard_kpis failed: {exc}")
+        return {}
+
+
+def get_eval_agent_avg_scores(days: int = 20) -> list:
+    """Return per-agent average quality scores over recent eval_runs."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT evr.agent_name, AVG(evr.quality_score) AS avg_score
+                    FROM eval_results evr
+                    JOIN eval_runs er ON evr.eval_run_id = er.id
+                    WHERE er.trade_date >= CURDATE() - INTERVAL :days DAY
+                      AND er.status = 'success'
+                    GROUP BY evr.agent_name
+                    ORDER BY avg_score DESC
+                """),
+                {"days": days},
+            ).fetchall()
+            return [{"agent_name": r[0], "avg_score": round(float(r[1] or 0), 1)} for r in rows]
+    except Exception as exc:
+        logger.warning(f"[eval] get_eval_agent_avg_scores failed: {exc}")
+        return []
+
+
+def get_session_episode(trade_date: date) -> Optional[dict]:
+    """Return one session_episodes row for the given trade_date, or None."""
+    try:
+        with _engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT * FROM session_episodes WHERE trade_date = :td"),
+                {"td": trade_date},
+            ).fetchone()
+            return dict(row._mapping) if row else None
+    except Exception as exc:
+        logger.warning(f"[eval] get_session_episode failed: {exc}")
+        return None
+
+
+# ── Adaptive Flywheel Phase 1: strategy_lessons ────────────────────────────────
+
+def ensure_strategy_lessons_table() -> None:
+    """Create strategy_lessons table. Called by ensure_observability_tables()."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS strategy_lessons (
+                    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    trade_date          DATE          NOT NULL,
+                    eval_run_id         BIGINT        NULL,
+                    error_type          VARCHAR(30)   NOT NULL,
+                    lesson_text         TEXT          NOT NULL,
+                    direction_correct   TINYINT       NOT NULL DEFAULT 0,
+                    predicted_direction VARCHAR(10)   NULL,
+                    actual_direction    VARCHAR(10)   NULL,
+                    predicted_gap_pct   DECIMAL(6,3)  NULL,
+                    actual_gap_pct      DECIMAL(6,3)  NULL,
+                    gap_error_abs       DECIMAL(6,3)  NULL,
+                    composite_score     DECIMAL(5,2)  NULL,
+                    regime_sox          VARCHAR(10)   NULL,
+                    regime_foreign_oi   VARCHAR(10)   NULL,
+                    divergence_signal   TINYINT       NULL,
+                    is_active           TINYINT       NOT NULL DEFAULT 1,
+                    expires_at          DATE          NULL,
+                    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_sl_trade_date  (trade_date),
+                    INDEX idx_sl_error_type      (error_type),
+                    INDEX idx_sl_regime          (regime_sox, regime_foreign_oi),
+                    INDEX idx_sl_active_date     (is_active, trade_date DESC)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_strategy_lessons_table failed: {exc}")
+
+
+def save_strategy_lesson(
+    trade_date: date,
+    error_type: str,
+    lesson_text: str,
+    direction_correct: int = 0,
+    predicted_direction: Optional[str] = None,
+    actual_direction: Optional[str] = None,
+    predicted_gap_pct: Optional[float] = None,
+    actual_gap_pct: Optional[float] = None,
+    gap_error_abs: Optional[float] = None,
+    composite_score: Optional[float] = None,
+    regime_sox: Optional[str] = None,
+    regime_foreign_oi: Optional[str] = None,
+    divergence_signal: Optional[int] = None,
+    eval_run_id: Optional[int] = None,
+) -> None:
+    """Upsert one strategy_lessons row. Expires after 90 days. Fail-silent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO strategy_lessons
+                        (trade_date, eval_run_id, error_type, lesson_text,
+                         direction_correct, predicted_direction, actual_direction,
+                         predicted_gap_pct, actual_gap_pct, gap_error_abs,
+                         composite_score, regime_sox, regime_foreign_oi,
+                         divergence_signal, is_active,
+                         expires_at)
+                    VALUES
+                        (:td, :erid, :etype, :lesson,
+                         :dc, :pd, :ad,
+                         :pgap, :agap, :gerr,
+                         :score, :rsox, :rfoi,
+                         :div, 1,
+                         DATE_ADD(:td, INTERVAL 90 DAY))
+                    ON DUPLICATE KEY UPDATE
+                        eval_run_id         = VALUES(eval_run_id),
+                        error_type          = VALUES(error_type),
+                        lesson_text         = VALUES(lesson_text),
+                        direction_correct   = VALUES(direction_correct),
+                        predicted_direction = VALUES(predicted_direction),
+                        actual_direction    = VALUES(actual_direction),
+                        predicted_gap_pct   = VALUES(predicted_gap_pct),
+                        actual_gap_pct      = VALUES(actual_gap_pct),
+                        gap_error_abs       = VALUES(gap_error_abs),
+                        composite_score     = VALUES(composite_score),
+                        regime_sox          = VALUES(regime_sox),
+                        regime_foreign_oi   = VALUES(regime_foreign_oi),
+                        divergence_signal   = VALUES(divergence_signal),
+                        is_active           = 1,
+                        expires_at          = DATE_ADD(VALUES(trade_date), INTERVAL 90 DAY)
+                """),
+                {"td": trade_date, "erid": eval_run_id, "etype": error_type,
+                 "lesson": lesson_text, "dc": direction_correct,
+                 "pd": predicted_direction, "ad": actual_direction,
+                 "pgap": predicted_gap_pct, "agap": actual_gap_pct,
+                 "gerr": gap_error_abs, "score": composite_score,
+                 "rsox": regime_sox, "rfoi": regime_foreign_oi, "div": divergence_signal},
+            )
+    except Exception as exc:
+        logger.warning(f"[flywheel] save_strategy_lesson failed: {exc}")
+
+
+def get_relevant_lessons(
+    regime_sox: Optional[str],
+    regime_foreign_oi: Optional[str],
+    divergence_signal: Optional[int],
+    limit: int = 3,
+) -> list:
+    """Return strategy_lessons ranked by regime similarity + recency + error type."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT trade_date, error_type, lesson_text,
+                           direction_correct, predicted_direction, actual_direction,
+                           predicted_gap_pct, actual_gap_pct, gap_error_abs,
+                           regime_sox, regime_foreign_oi, divergence_signal,
+                           (CASE WHEN regime_sox       = :rsox THEN 20 ELSE 0 END +
+                            CASE WHEN regime_foreign_oi = :rfoi THEN 15 ELSE 0 END +
+                            CASE WHEN divergence_signal = :div  THEN 10 ELSE 0 END +
+                            CASE WHEN DATEDIFF(CURDATE(), trade_date) <= 7  THEN 25 ELSE 0 END +
+                            CASE WHEN DATEDIFF(CURDATE(), trade_date) <= 30 THEN 15 ELSE 0 END +
+                            CASE WHEN error_type IN ('direction_error','overconfidence_error')
+                                 THEN 10 ELSE 0 END
+                           ) AS relevance
+                    FROM strategy_lessons
+                    WHERE is_active = 1
+                      AND (expires_at IS NULL OR expires_at >= CURDATE())
+                    ORDER BY relevance DESC, trade_date DESC
+                    LIMIT :lim
+                """),
+                {"rsox": regime_sox, "rfoi": regime_foreign_oi,
+                 "div": divergence_signal, "lim": limit},
+            ).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.warning(f"[flywheel] get_relevant_lessons failed: {exc}")
+        return []
+
+
+def cleanup_expired_lessons() -> int:
+    """Set is_active=0 for lessons past expires_at. Returns affected row count."""
+    try:
+        with _engine().begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE strategy_lessons
+                    SET is_active = 0
+                    WHERE expires_at IS NOT NULL AND expires_at < CURDATE()
+                      AND is_active = 1
+                """)
+            )
+            return result.rowcount
+    except Exception as exc:
+        logger.warning(f"[flywheel] cleanup_expired_lessons failed: {exc}")
+        return 0
