@@ -1217,30 +1217,36 @@ def ensure_strategy_lessons_table() -> None:
         with _engine().begin() as conn:
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS strategy_lessons (
-                    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
-                    trade_date          DATE          NOT NULL,
-                    eval_run_id         BIGINT        NULL,
-                    error_type          VARCHAR(30)   NOT NULL,
-                    lesson_text         TEXT          NOT NULL,
-                    direction_correct   TINYINT       NOT NULL DEFAULT 0,
-                    predicted_direction VARCHAR(10)   NULL,
-                    actual_direction    VARCHAR(10)   NULL,
-                    predicted_gap_pct   DECIMAL(6,3)  NULL,
-                    actual_gap_pct      DECIMAL(6,3)  NULL,
-                    gap_error_abs       DECIMAL(6,3)  NULL,
-                    composite_score     DECIMAL(5,2)  NULL,
-                    regime_sox          VARCHAR(10)   NULL,
-                    regime_foreign_oi   VARCHAR(10)   NULL,
-                    divergence_signal   TINYINT       NULL,
-                    is_active           TINYINT       NOT NULL DEFAULT 1,
-                    expires_at          DATE          NULL,
-                    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    id                   BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    trade_date           DATE          NOT NULL,
+                    eval_run_id          BIGINT        NULL,
+                    error_type           VARCHAR(30)   NOT NULL,
+                    lesson_text          TEXT          NOT NULL,
+                    direction_correct    TINYINT       NOT NULL DEFAULT 0,
+                    predicted_direction  VARCHAR(10)   NULL,
+                    actual_direction     VARCHAR(10)   NULL,
+                    predicted_gap_pct    DECIMAL(6,3)  NULL,
+                    actual_gap_pct       DECIMAL(6,3)  NULL,
+                    gap_error_abs        DECIMAL(6,3)  NULL,
+                    composite_score      DECIMAL(5,2)  NULL,
+                    regime_sox           VARCHAR(10)   NULL,
+                    regime_foreign_oi    VARCHAR(10)   NULL,
+                    divergence_signal    TINYINT       NULL,
+                    lesson_quality_score DECIMAL(3,1)  NULL,
+                    is_active            TINYINT       NOT NULL DEFAULT 1,
+                    expires_at           DATE          NULL,
+                    created_at           TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE KEY uq_sl_trade_date  (trade_date),
                     INDEX idx_sl_error_type      (error_type),
                     INDEX idx_sl_regime          (regime_sox, regime_foreign_oi),
                     INDEX idx_sl_active_date     (is_active, trade_date DESC)
                 )
             """))
+            # Add column to pre-existing tables that lack it
+            conn.execute(text(
+                "ALTER TABLE strategy_lessons"
+                " ADD COLUMN IF NOT EXISTS lesson_quality_score DECIMAL(3,1) NULL"
+            ))
     except Exception as exc:
         logger.warning(f"[migration] ensure_strategy_lessons_table failed: {exc}")
 
@@ -1260,6 +1266,7 @@ def save_strategy_lesson(
     regime_foreign_oi: Optional[str] = None,
     divergence_signal: Optional[int] = None,
     eval_run_id: Optional[int] = None,
+    lesson_quality_score: Optional[float] = None,
 ) -> None:
     """Upsert one strategy_lessons row. Expires after 90 days. Fail-silent."""
     try:
@@ -1271,38 +1278,40 @@ def save_strategy_lesson(
                          direction_correct, predicted_direction, actual_direction,
                          predicted_gap_pct, actual_gap_pct, gap_error_abs,
                          composite_score, regime_sox, regime_foreign_oi,
-                         divergence_signal, is_active,
+                         divergence_signal, lesson_quality_score, is_active,
                          expires_at)
                     VALUES
                         (:td, :erid, :etype, :lesson,
                          :dc, :pd, :ad,
                          :pgap, :agap, :gerr,
                          :score, :rsox, :rfoi,
-                         :div, 1,
+                         :div, :lqs, 1,
                          DATE_ADD(:td, INTERVAL 90 DAY))
                     ON DUPLICATE KEY UPDATE
-                        eval_run_id         = VALUES(eval_run_id),
-                        error_type          = VALUES(error_type),
-                        lesson_text         = VALUES(lesson_text),
-                        direction_correct   = VALUES(direction_correct),
-                        predicted_direction = VALUES(predicted_direction),
-                        actual_direction    = VALUES(actual_direction),
-                        predicted_gap_pct   = VALUES(predicted_gap_pct),
-                        actual_gap_pct      = VALUES(actual_gap_pct),
-                        gap_error_abs       = VALUES(gap_error_abs),
-                        composite_score     = VALUES(composite_score),
-                        regime_sox          = VALUES(regime_sox),
-                        regime_foreign_oi   = VALUES(regime_foreign_oi),
-                        divergence_signal   = VALUES(divergence_signal),
-                        is_active           = 1,
-                        expires_at          = DATE_ADD(VALUES(trade_date), INTERVAL 90 DAY)
+                        eval_run_id          = VALUES(eval_run_id),
+                        error_type           = VALUES(error_type),
+                        lesson_text          = VALUES(lesson_text),
+                        direction_correct    = VALUES(direction_correct),
+                        predicted_direction  = VALUES(predicted_direction),
+                        actual_direction     = VALUES(actual_direction),
+                        predicted_gap_pct    = VALUES(predicted_gap_pct),
+                        actual_gap_pct       = VALUES(actual_gap_pct),
+                        gap_error_abs        = VALUES(gap_error_abs),
+                        composite_score      = VALUES(composite_score),
+                        regime_sox           = VALUES(regime_sox),
+                        regime_foreign_oi    = VALUES(regime_foreign_oi),
+                        divergence_signal    = VALUES(divergence_signal),
+                        lesson_quality_score = VALUES(lesson_quality_score),
+                        is_active            = 1,
+                        expires_at           = DATE_ADD(VALUES(trade_date), INTERVAL 90 DAY)
                 """),
                 {"td": trade_date, "erid": eval_run_id, "etype": error_type,
                  "lesson": lesson_text, "dc": direction_correct,
                  "pd": predicted_direction, "ad": actual_direction,
                  "pgap": predicted_gap_pct, "agap": actual_gap_pct,
                  "gerr": gap_error_abs, "score": composite_score,
-                 "rsox": regime_sox, "rfoi": regime_foreign_oi, "div": divergence_signal},
+                 "rsox": regime_sox, "rfoi": regime_foreign_oi,
+                 "div": divergence_signal, "lqs": lesson_quality_score},
             )
     except Exception as exc:
         logger.warning(f"[flywheel] save_strategy_lesson failed: {exc}")
@@ -1323,13 +1332,15 @@ def get_relevant_lessons(
                            direction_correct, predicted_direction, actual_direction,
                            predicted_gap_pct, actual_gap_pct, gap_error_abs,
                            regime_sox, regime_foreign_oi, divergence_signal,
+                           lesson_quality_score,
                            (CASE WHEN regime_sox       = :rsox THEN 20 ELSE 0 END +
                             CASE WHEN regime_foreign_oi = :rfoi THEN 15 ELSE 0 END +
                             CASE WHEN divergence_signal = :div  THEN 10 ELSE 0 END +
                             CASE WHEN DATEDIFF(CURDATE(), trade_date) <= 7  THEN 25 ELSE 0 END +
                             CASE WHEN DATEDIFF(CURDATE(), trade_date) <= 30 THEN 15 ELSE 0 END +
                             CASE WHEN error_type IN ('direction_error','overconfidence_error')
-                                 THEN 10 ELSE 0 END
+                                 THEN 10 ELSE 0 END +
+                            CASE WHEN lesson_quality_score >= 4.0 THEN 5 ELSE 0 END
                            ) AS relevance
                     FROM strategy_lessons
                     WHERE is_active = 1
@@ -1393,6 +1404,7 @@ def get_recent_lessons(limit: int = 14) -> list[dict]:
             rows = conn.execute(text("""
                 SELECT trade_date, error_type, direction_correct,
                        regime_sox, regime_foreign_oi, composite_score,
+                       lesson_quality_score,
                        LEFT(lesson_text, 150) AS lesson_preview,
                        expires_at
                 FROM strategy_lessons
@@ -1403,7 +1415,7 @@ def get_recent_lessons(limit: int = 14) -> list[dict]:
             """), {"limit": limit}).fetchall()
             cols = ["trade_date", "error_type", "direction_correct",
                     "regime_sox", "regime_foreign_oi", "composite_score",
-                    "lesson_preview", "expires_at"]
+                    "lesson_quality_score", "lesson_preview", "expires_at"]
             return [dict(zip(cols, r)) for r in rows]
     except Exception as exc:
         logger.warning(f"[flywheel] get_recent_lessons failed: {exc}")

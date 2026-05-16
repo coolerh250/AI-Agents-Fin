@@ -1,8 +1,9 @@
 """
 lesson_writer.py
-Adaptive Flywheel Phase 1 — extract and persist strategy lessons from backtest reports.
-No LLM calls. Fail-silent. Called from backtest_agent.save_accuracy_node.
+Adaptive Flywheel — extract, score, and persist strategy lessons from backtest reports.
+Fail-silent. Called from backtest_agent.save_accuracy_node.
 """
+import os
 import re
 from datetime import date
 from typing import Optional
@@ -78,6 +79,32 @@ def classify_error(
     return "correct_prediction"
 
 
+def _score_lesson(lesson_text: str) -> Optional[float]:
+    """Call Haiku to rate lesson quality 1.0–5.0. Returns None on any failure."""
+    try:
+        from langchain_anthropic import ChatAnthropic
+        llm = ChatAnthropic(
+            model="claude-haiku-4-5-20251001",
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+            max_tokens=20,
+            temperature=0,
+        )
+        prompt = (
+            "請為以下交易策略反省教訓評分（1–5 分，5 分最佳）。\n"
+            "評分標準：具體性、可操作性、清晰度。\n"
+            "只回覆一個數字（如 3.5），不加任何說明。\n\n"
+            f"教訓內容：\n{lesson_text[:500]}"
+        )
+        result = llm.invoke(prompt).content.strip()
+        m = re.search(r"[1-5](?:\.[0-9])?", result)
+        if not m:
+            return None
+        return max(1.0, min(5.0, float(m.group())))
+    except Exception as exc:
+        logger.debug(f"[LessonWriter] lesson quality scoring failed: {exc}")
+        return None
+
+
 def write_lesson(
     trade_date: date,
     accuracy_report: str,
@@ -138,6 +165,10 @@ def write_lesson(
             div = session_episode.get("divergence_signal")
             divergence_signal = int(div) if div is not None else None
 
+        quality_score = _score_lesson(lesson_text)
+        if quality_score is not None:
+            logger.debug(f"[LessonWriter] 教訓品質分：{quality_score}/5")
+
         from database_tools import save_strategy_lesson
         save_strategy_lesson(
             trade_date=trade_date,
@@ -154,8 +185,9 @@ def write_lesson(
             regime_foreign_oi=regime_foreign_oi,
             divergence_signal=divergence_signal,
             eval_run_id=eval_run_id,
+            lesson_quality_score=quality_score,
         )
-        logger.success(f"[LessonWriter] {trade_date} 教訓已寫入（{error_type}）")
+        logger.success(f"[LessonWriter] {trade_date} 教訓已寫入（{error_type}，品質分 {quality_score}）")
         return True
 
     except Exception as exc:

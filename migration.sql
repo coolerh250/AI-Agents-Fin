@@ -155,3 +155,6 @@ CREATE TABLE IF NOT EXISTS strategy_lessons (
     INDEX idx_sl_regime          (regime_sox, regime_foreign_oi),
     INDEX idx_sl_active_date     (is_active, trade_date DESC)
 );
+
+-- Step 10: Add lesson_quality_score to strategy_lessons (Flywheel Phase 2)
+ALTER TABLE strategy_lessons ADD COLUMN IF NOT EXISTS lesson_quality_score DECIMAL(3,1) NULL;

@@ -642,6 +642,7 @@ with tab_flywheel:
                 "SOX 態勢":   r["regime_sox"] or "—",
                 "外資 OI":    r["regime_foreign_oi"] or "—",
                 "品質分":     round(float(r["composite_score"]), 1) if r["composite_score"] is not None else None,
+                "教訓評分":   round(float(r["lesson_quality_score"]), 1) if r.get("lesson_quality_score") is not None else None,
                 "教訓摘要":   str(r["lesson_preview"] or "").replace("\n", " ")[:120],
                 "到期日":     str(r["expires_at"]),
             }
