@@ -1362,3 +1362,49 @@ def cleanup_expired_lessons() -> int:
     except Exception as exc:
         logger.warning(f"[flywheel] cleanup_expired_lessons failed: {exc}")
         return 0
+
+
+def get_flywheel_stats() -> dict:
+    """Return active lesson count total and breakdown by error_type."""
+    try:
+        with _engine().connect() as conn:
+            total = conn.execute(text(
+                "SELECT COUNT(*) FROM strategy_lessons"
+                " WHERE is_active=1 AND (expires_at IS NULL OR expires_at >= CURDATE())"
+            )).scalar()
+            rows = conn.execute(text(
+                "SELECT error_type, COUNT(*) AS cnt FROM strategy_lessons"
+                " WHERE is_active=1 AND (expires_at IS NULL OR expires_at >= CURDATE())"
+                " GROUP BY error_type ORDER BY cnt DESC"
+            )).fetchall()
+            return {
+                "total": int(total or 0),
+                "by_error_type": [{"error_type": r[0], "count": int(r[1])} for r in rows],
+            }
+    except Exception as exc:
+        logger.warning(f"[flywheel] get_flywheel_stats failed: {exc}")
+        return {"total": 0, "by_error_type": []}
+
+
+def get_recent_lessons(limit: int = 14) -> list[dict]:
+    """Return most recent active strategy lessons ordered by trade_date DESC."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT trade_date, error_type, direction_correct,
+                       regime_sox, regime_foreign_oi, composite_score,
+                       LEFT(lesson_text, 150) AS lesson_preview,
+                       expires_at
+                FROM strategy_lessons
+                WHERE is_active = 1
+                  AND (expires_at IS NULL OR expires_at >= CURDATE())
+                ORDER BY trade_date DESC
+                LIMIT :limit
+            """), {"limit": limit}).fetchall()
+            cols = ["trade_date", "error_type", "direction_correct",
+                    "regime_sox", "regime_foreign_oi", "composite_score",
+                    "lesson_preview", "expires_at"]
+            return [dict(zip(cols, r)) for r in rows]
+    except Exception as exc:
+        logger.warning(f"[flywheel] get_recent_lessons failed: {exc}")
+        return []

@@ -19,10 +19,12 @@ from database_tools import (
     get_eval_dashboard_kpis,
     get_eval_results,
     get_eval_runs,
+    get_flywheel_stats,
     get_per_run_cost_summary,
     get_portfolio,
     get_recent_accuracy,
     get_recent_events,
+    get_recent_lessons,
     get_workflow_runs,
     save_actual,
     update_portfolio_item,
@@ -116,13 +118,14 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events, tab_eval = st.tabs([
+tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events, tab_eval, tab_flywheel = st.tabs([
     "📊 預測準確度",
     "💰 API 成本分析",
     "💼 個人持倉管理",
     "🟢 系統健康",
     "📋 事件日誌",
     "📝 評估",
+    "🔄 Flywheel",
 ])
 
 
@@ -572,3 +575,77 @@ with tab_eval:
 
         eval_display_df = pd.DataFrame(display)
         st.dataframe(eval_display_df, use_container_width=True)
+
+
+# ── Tab 7: Flywheel ───────────────────────────────────────────────────────────
+
+with tab_flywheel:
+    st.subheader("🔄 Adaptive Data Flywheel — 策略教訓學習")
+
+    fw_stats   = get_flywheel_stats()
+    fw_lessons = get_recent_lessons(14)
+    eval_rows  = get_eval_runs(30)
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    error_counts = {r["error_type"]: r["count"] for r in fw_stats["by_error_type"]}
+    top_error    = max(error_counts, key=error_counts.get) if error_counts else "—"
+    dir_errors   = error_counts.get("direction_error", 0) + error_counts.get("overconfidence_error", 0)
+
+    fw1, fw2, fw3, fw4 = st.columns(4)
+    fw1.metric("活躍教訓總數", fw_stats["total"], help="90 天滾動視窗（strategy_lessons）")
+    fw2.metric("最常見錯誤類型", top_error)
+    fw3.metric("方向類錯誤筆數", dir_errors, help="direction_error + overconfidence_error")
+    fw4.metric("最近評估次數（30 天）", len(eval_rows))
+
+    st.divider()
+
+    # ── Charts row ────────────────────────────────────────────────────────────
+    c_left, c_right = st.columns(2)
+
+    with c_left:
+        st.subheader("錯誤類型分佈")
+        if fw_stats["by_error_type"]:
+            err_df = pd.DataFrame(fw_stats["by_error_type"]).set_index("error_type")
+            st.bar_chart(err_df["count"])
+        else:
+            st.info("尚無教訓資料 — backtest_agent.py 執行後自動填入")
+
+    with c_right:
+        st.subheader("建議書品質分趨勢（30 天）")
+        if eval_rows:
+            q_df = pd.DataFrame([
+                {"日期": str(r["trade_date"]), "品質分": r.get("brief_quality_score")}
+                for r in eval_rows
+                if r.get("brief_quality_score") is not None
+            ])
+            if not q_df.empty:
+                q_df = q_df.sort_values("日期").set_index("日期")
+                st.line_chart(q_df["品質分"])
+            else:
+                st.info("尚無品質分資料")
+        else:
+            st.info("尚無評估記錄")
+
+    st.divider()
+
+    # ── Lessons detail table ──────────────────────────────────────────────────
+    st.subheader("近 14 筆教訓明細")
+    if not fw_lessons:
+        st.info("strategy_lessons 尚無資料，請執行 backtest_agent.py 後重新整理。")
+    else:
+        _DIR_ICON = {1: "✅", 0: "❌"}
+        rows_display = [
+            {
+                "日期":       str(r["trade_date"]),
+                "錯誤類型":   r["error_type"],
+                "方向":       _DIR_ICON.get(r["direction_correct"], "—"),
+                "SOX 態勢":   r["regime_sox"] or "—",
+                "外資 OI":    r["regime_foreign_oi"] or "—",
+                "品質分":     round(float(r["composite_score"]), 1) if r["composite_score"] is not None else None,
+                "教訓摘要":   str(r["lesson_preview"] or "").replace("\n", " ")[:120],
+                "到期日":     str(r["expires_at"]),
+            }
+            for r in fw_lessons
+        ]
+        fw_df = pd.DataFrame(rows_display)
+        st.dataframe(fw_df, use_container_width=True, hide_index=True)
