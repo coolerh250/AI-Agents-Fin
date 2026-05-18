@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from typing import TypedDict
 
 from dotenv import load_dotenv
@@ -108,7 +109,16 @@ def think_node(state: AgentState) -> dict:
         ]
 
         logger.debug("[THINK] Sending prompt to Claude...")
+        start = time.monotonic()
         response = llm.invoke(messages)
+        latency_ms = int((time.monotonic() - start) * 1000)
+        try:
+            from telemetry import record_usage
+            user_msg = f"Task:\n{TASK}\n\nLive system statistics:\n{json.dumps(state['system_stats'], indent=2)}"
+            record_usage("maintenance_agent", MODEL_ID, response, latency_ms,
+                         system_prompt=SYSTEM_PROMPT, user_content=user_msg)
+        except Exception:
+            pass
         analysis: str = response.content
 
         status = "UNKNOWN"

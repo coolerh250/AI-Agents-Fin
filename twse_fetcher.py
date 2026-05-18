@@ -4,6 +4,7 @@ Fetch TAIEX (發行量加權股價指數) daily data from TWSE public JSON API.
 TWSE /MI_INDEX?type=IND returns close + daily change; open price is not published,
 so close-to-close change is used as the gap-direction proxy.
 """
+import ssl
 import httpx
 from datetime import date, timedelta
 
@@ -13,12 +14,20 @@ _TWSE_MI_INDEX = "https://www.twse.com.tw/exchangeReport/MI_INDEX"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TaiwanStockBot/1.0)"}
 
 
+def _twse_ssl_context() -> ssl.SSLContext:
+    # TWSE certificate chain (legacy TW gov CA) lacks Subject Key Identifier extension.
+    # OpenSSL 3.x enforces SKI via verify_flags; resetting to 0 removes that check
+    # while keeping CA chain validation and hostname verification intact.
+    ctx = ssl.create_default_context()
+    ctx.verify_flags = 0
+    return ctx
+
+
 def _fetch_ind(trade_date: date) -> dict:
     date_str = trade_date.strftime("%Y%m%d")
     url = f"{_TWSE_MI_INDEX}?response=json&date={date_str}&type=IND"
     try:
-        # verify=False: TWSE certificate lacks Subject Key Identifier (legacy TW gov CA)
-        with httpx.Client(timeout=10.0, headers=_HEADERS, verify=False) as client:
+        with httpx.Client(timeout=10.0, headers=_HEADERS, verify=_twse_ssl_context()) as client:
             resp = client.get(url)
             resp.raise_for_status()
         return resp.json()

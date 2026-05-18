@@ -7,6 +7,7 @@ compares prediction vs reality, and outputs an accuracy report.
 import json
 import os
 import sys
+import time
 from datetime import date, timedelta
 from typing import Optional, TypedDict
 
@@ -130,10 +131,18 @@ def evaluate_node(state: BacktestState) -> dict:
         api_key=os.getenv("ANTHROPIC_API_KEY"),
         max_tokens=1024,
     )
+    start = time.monotonic()
     response = llm.invoke([
         SystemMessage(content=_EVAL_SYSTEM),
         HumanMessage(content=user_content),
     ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    try:
+        from telemetry import record_usage
+        record_usage("backtest_evaluator", MODEL_ID, response, latency_ms,
+                     system_prompt=_EVAL_SYSTEM, user_content=user_content)
+    except Exception:
+        pass
     report = response.content.strip()
     logger.success("[Evaluate] 評估報告完成")
     return {"accuracy_report": report}
@@ -206,6 +215,20 @@ def save_accuracy_node(state: BacktestState) -> dict:
             logger.warning("[SaveAccuracy] create_eval_run 返回無效 ID，略過寫入")
     except Exception as exc:
         logger.warning(f"[SaveAccuracy] 寫入失敗（略過）: {exc}")
+
+    # Backfill session_episodes with actual outcome
+    try:
+        from database_tools import backfill_session_episode_actuals
+        from datetime import date as _date
+        td = _date.fromisoformat(state["trade_date"])
+        backfill_session_episode_actuals(
+            trade_date=td,
+            actual_direction=actual_dir,
+            actual_gap_pct=float(actual_data.get("actual_gap_pct")) if actual_data.get("actual_gap_pct") is not None else None,
+            direction_correct=direction_correct,
+        )
+    except Exception as exc:
+        logger.warning(f"[SaveAccuracy] session_episodes 回填失敗（略過）: {exc}")
 
     # Adaptive Flywheel: extract and persist strategy lesson
     try:

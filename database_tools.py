@@ -956,6 +956,36 @@ def log_session_episode(
         logger.warning(f"[telemetry] log_session_episode failed: {exc}")
 
 
+def backfill_session_episode_actuals(
+    trade_date: date,
+    actual_direction: Optional[str],
+    actual_gap_pct: Optional[float],
+    direction_correct: Optional[int],
+) -> bool:
+    """UPDATE session_episodes actual_* fields for a given trade_date. Fail-silent."""
+    try:
+        with _engine().begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE session_episodes
+                    SET actual_direction  = :ad,
+                        actual_gap_pct   = :ag,
+                        direction_correct = :dc
+                    WHERE trade_date = :td
+                """),
+                {"ad": actual_direction, "ag": actual_gap_pct, "dc": direction_correct, "td": trade_date},
+            )
+        updated = result.rowcount
+        if updated > 0:
+            logger.debug(f"[backfill] session_episodes actual_* updated for {trade_date}")
+        else:
+            logger.debug(f"[backfill] no session_episodes row for {trade_date} (workflow may not have run)")
+        return updated > 0
+    except Exception as exc:
+        logger.warning(f"[backfill] backfill_session_episode_actuals failed: {exc}")
+        return False
+
+
 # ── Evaluation Framework ────────────────────────────────────────────────────────
 
 def ensure_eval_tables() -> None:
