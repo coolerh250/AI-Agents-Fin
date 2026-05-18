@@ -171,3 +171,14 @@ ALTER TABLE strategy_lessons ADD COLUMN IF NOT EXISTS lesson_quality_score DECIM
 -- Run manually if needed; ensure_observability_tables() handles this automatically.
 ALTER TABLE daily_briefs DROP INDEX IF EXISTS idx_trade_date;
 ALTER TABLE daily_briefs ADD UNIQUE KEY IF NOT EXISTS uq_db_trade_date (trade_date);
+
+-- Step 13: stock_info — stock code to company name mapping
+-- One row per stock_id. Synced from TWSE on demand (only missing portfolio codes).
+-- Created automatically by ensure_stock_info_table() in database_tools.py
+CREATE TABLE IF NOT EXISTS stock_info (
+    stock_id     VARCHAR(20)   NOT NULL,
+    company_name VARCHAR(100)  NOT NULL,
+    market       VARCHAR(10)   NULL,
+    last_synced  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (stock_id)
+);

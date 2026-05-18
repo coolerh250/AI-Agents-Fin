@@ -228,6 +228,25 @@ def main():
     ensure_portfolio_table()
     seed_test_portfolio()
 
+    # Sync company names for portfolio items not yet in stock_info
+    try:
+        from database_tools import get_portfolio_missing_names, upsert_stock_info
+        from twse_fetcher import lookup_company_name
+        missing = get_portfolio_missing_names()
+        if missing:
+            logger.info(f"[StockSync] 同步 {len(missing)} 筆股票名稱: {missing}")
+            for sid in missing:
+                name = lookup_company_name(sid)
+                if name:
+                    upsert_stock_info(sid, name)
+                    logger.success(f"[StockSync] {sid} → {name}")
+                else:
+                    logger.warning(f"[StockSync] 無法取得 {sid} 公司名稱（TWSE 查無資料）")
+        else:
+            logger.debug("[StockSync] 所有持倉股票名稱均已同步")
+    except Exception as exc:
+        logger.warning(f"[StockSync] 股票名稱同步失敗（略過）: {exc}")
+
     snapshot = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
     from snapshot_integrity import verify_snapshot
     verify_snapshot(snapshot)

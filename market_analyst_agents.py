@@ -504,7 +504,7 @@ def save_to_db_node(state: WorkflowState) -> dict:
                     "brief_text":        brief,
                     "predicted_gap_pct": gap_pct,
                     "gap_direction":     gap_dir,
-                    "_api_key":          os.getenv("MCP_WRITE_TOKEN", ""),
+                    "api_key":           os.getenv("MCP_WRITE_TOKEN", ""),
                 },
             )
             if not result.get("success"):

@@ -102,3 +102,39 @@ def get_taiex_actuals(trade_date: date, max_lookback: int = 5) -> dict | None:
 
     logger.error(f"[TWSE] No data for {trade_date} within {max_lookback}-day lookback")
     return None
+
+
+def lookup_company_name(stock_id: str) -> str | None:
+    """
+    Return the company name for a single stock_id by querying TWSE STOCK_DAY.
+    Tries current month first, then up to 2 prior months.
+    Title format: "115年05月 2330 台積電 各日成交資訊" → parts[2] = company name.
+    """
+    from datetime import date as _date
+    check = _date.today().replace(day=1)
+    for _ in range(3):
+        date_str = check.strftime("%Y%m%d")
+        url = (
+            f"https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+            f"?response=json&date={date_str}&stockNo={stock_id}"
+        )
+        try:
+            with httpx.Client(timeout=10.0, headers=_HEADERS, verify=_twse_ssl_context()) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+            data = resp.json()
+            if data.get("stat") == "OK":
+                title = data.get("title", "")
+                parts = title.split()
+                if len(parts) >= 3:
+                    logger.info(f"[TWSE] {stock_id} → {parts[2]}")
+                    return parts[2]
+        except Exception as exc:
+            logger.warning(f"[TWSE] lookup_company_name({stock_id}) failed: {exc}")
+        # Try one month earlier
+        if check.month == 1:
+            check = check.replace(year=check.year - 1, month=12)
+        else:
+            check = check.replace(month=check.month - 1)
+    logger.warning(f"[TWSE] could not find company name for {stock_id}")
+    return None

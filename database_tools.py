@@ -477,6 +477,7 @@ def ensure_observability_tables() -> None:
     ensure_session_episodes_table()     # Phase 4
     ensure_eval_tables()                # Evaluation Framework
     ensure_strategy_lessons_table()     # Adaptive Flywheel Phase 1
+    ensure_stock_info_table()           # Stock code → company name mapping
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1453,4 +1454,74 @@ def get_recent_lessons(limit: int = 14) -> list[dict]:
             return [dict(zip(cols, r)) for r in rows]
     except Exception as exc:
         logger.warning(f"[flywheel] get_recent_lessons failed: {exc}")
+        return []
+
+
+# ── Stock info (code → company name) ───────────────────────────────────────────
+
+def ensure_stock_info_table() -> None:
+    """Create stock_info table. Called by ensure_observability_tables()."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS stock_info (
+                    stock_id     VARCHAR(20)   NOT NULL,
+                    company_name VARCHAR(100)  NOT NULL,
+                    market       VARCHAR(10)   NULL,
+                    last_synced  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+                                              ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (stock_id)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_stock_info_table failed: {exc}")
+
+
+def upsert_stock_info(stock_id: str, company_name: str, market: Optional[str] = None) -> None:
+    """Insert or update a stock_id → company_name mapping. Fail-silent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO stock_info (stock_id, company_name, market)
+                    VALUES (:sid, :name, :mkt)
+                    ON DUPLICATE KEY UPDATE
+                        company_name = VALUES(company_name),
+                        market       = VALUES(market),
+                        last_synced  = CURRENT_TIMESTAMP
+                """),
+                {"sid": stock_id, "name": company_name, "mkt": market},
+            )
+    except Exception as exc:
+        logger.warning(f"[stock_info] upsert_stock_info failed for {stock_id}: {exc}")
+
+
+def get_stock_name(stock_id: str) -> Optional[str]:
+    """Return company_name for stock_id, or None if not found."""
+    try:
+        with _engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT company_name FROM stock_info WHERE stock_id = :sid"),
+                {"sid": stock_id},
+            ).fetchone()
+        return row[0] if row else None
+    except Exception as exc:
+        logger.warning(f"[stock_info] get_stock_name failed for {stock_id}: {exc}")
+        return None
+
+
+def get_portfolio_missing_names() -> list:
+    """Return stock_ids in user_portfolio that have no entry in stock_info."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT p.stock_id
+                FROM user_portfolio p
+                LEFT JOIN stock_info s ON s.stock_id = p.stock_id
+                WHERE s.stock_id IS NULL
+                ORDER BY p.stock_id
+            """)).fetchall()
+        return [r[0] for r in rows]
+    except Exception as exc:
+        logger.warning(f"[stock_info] get_portfolio_missing_names failed: {exc}")
         return []
