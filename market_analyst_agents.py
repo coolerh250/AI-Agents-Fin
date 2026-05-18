@@ -359,8 +359,9 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     except Exception:
         enriched = holdings  # bare fallback if calculate_pnl itself raises
 
+    from database_tools import get_stock_name
     pnl_lines = [
-        f"股票代碼: {h['stock_id']} | 成本: {h['entry_price']} | 現價: {h.get('current_price', h['entry_price']):.2f} | "
+        f"股票代碼: {h['stock_id']} {get_stock_name(h['stock_id']) or ''} | 成本: {h['entry_price']} | 現價: {h.get('current_price', h['entry_price']):.2f} | "
         f"持股數: {h['quantity']} 股 | 損益: {h.get('unrealized_pnl', 0):.2f} ({h.get('pnl_pct', 0):.2f}%) | "
         f"止損觸發: {'是' if h.get('stop_loss_triggered') else '否'} | 策略: {h['strategy_type']}"
         for h in enriched
