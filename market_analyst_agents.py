@@ -22,6 +22,7 @@ _OWNER_LINE_ID: Optional[str] = os.getenv("LINE_USER_ID") or None
 # Phase 3: context size limits (chars) to guard against runaway input
 _CTX_LIMIT_CHIEF_HISTORY_CHARS  = 800   # max chars for injected SQL history
 _CTX_LIMIT_CHIEF_LESSONS_CHARS  = 600   # max chars for strategy lessons context
+_CTX_LIMIT_CHIEF_NEWS_CHARS     = 800   # max chars for financial news headlines
 _CTX_LIMIT_PORTFOLIO_CHARS      = 3000  # max chars for portfolio PnL block
 
 _MODEL_HAIKU  = "claude-haiku-4-5-20251001"
@@ -51,34 +52,56 @@ class WorkflowState(TypedDict):
 
 _COLLECTOR_SYSTEM = """你是資料前處理 Agent。
 從原始快照中提取關鍵數值，以 JSON 回應（不加 code block）：
-{"foreign_oi_net": int, "trust_oi_net": int, "dealer_oi_net": int,
+{"foreign_oi_long": int, "foreign_oi_short": int, "foreign_oi_net": int,
+ "trust_oi_long": int, "trust_oi_short": int, "trust_oi_net": int,
+ "dealer_oi_long": int, "dealer_oi_short": int, "dealer_oi_net": int,
  "djia_chg_pct": float, "ndx_chg_pct": float,
  "sox_chg_pct": float, "tsm_adr_chg_pct": float,
- "data_ok": bool, "missing_fields": []}"""
+ "night_futures_chg_pct": float_or_null,
+ "data_ok": bool, "missing_fields": []}
+若快照中 get_tw_night_futures 有 error 欄位或資料缺失，night_futures_chg_pct 填 null。"""
 
 _CHIP_SYSTEM = """你是台灣期貨市場籌碼專家。根據三大法人留倉數據分析多空力道。
-判斷規則：
+判斷規則（net 部位）：
 - 外資 oi_net < -30,000 口 → 極度偏空
 - 外資 oi_net 在 -10,000 ~ -30,000 口 → 偏空
 - 外資 oi_net 在 0 ~ -10,000 口 → 輕微偏空
 - 外資 oi_net > 0 → 偏多
 - 若投信 oi_net > 20,000 且外資偏空 → 籌碼面反向指標（法人分歧）
+空方比率分析（若有 oi_long / oi_short）：
+- 外資空方比率 = oi_short / (oi_long + oi_short)
+  - > 0.60 → 主動加空、空方主導（看空信心強）
+  - 0.40 ~ 0.60 → 多空均衡
+  - < 0.40 → 多方主導
+- 多空雙增（oi_long ↑ 且 oi_short ↑）→ 分歧加劇，市場不確定性高
 嚴格以 JSON 格式回應（不要加 markdown code block）：
-{"sentiment": str, "foreign_oi_net": int, "trust_net": int, "dealer_net": int, "divergence_signal": bool, "reasoning": str}"""
+{"sentiment": str, "foreign_oi_net": int, "foreign_short_ratio": float, "trust_net": int, "dealer_net": int, "divergence_signal": bool, "reasoning": str}"""
 
-_TECH_SYSTEM = """你是台股技術面專家，根據前一日美股表現預測今日台股開盤跳空方向與力道。
-參考指標（對台股的影響權重）：
-- DJIA change_pct（權重 20%）
-- NASDAQ 100 change_pct（權重 25%）
+_TECH_SYSTEM = """你是台股技術面專家，根據前一日美股表現與台指期夜盤數據預測今日台股開盤跳空方向與力道。
+
+【若有台指期夜盤資料（night_futures_chg_pct 不為 null）】
+使用以下權重（夜盤為最直接開盤信號）：
+- 台指期夜盤 change_pct（權重 40%）← 最直接的台股開盤前信號
+- PHLX SOX change_pct（權重 20%）
+- NASDAQ 100 change_pct（權重 18%）
+- TSMC ADR change_pct（權重 14%）
+- DJIA change_pct（權重 8%）
+若夜盤與美股方向相反，應以夜盤為主並在 reasoning 說明背離原因。
+
+【若無夜盤資料（night_futures_chg_pct 為 null）】
+使用以下權重：
 - PHLX SOX change_pct（權重 30%）
+- NASDAQ 100 change_pct（權重 25%）
 - TSMC ADR change_pct（權重 25%）
+- DJIA change_pct（權重 20%）
+
 跳空判斷基準（加權平均）：
 - 加權平均 > +1.5% → 強力跳空高開（預估 +1%~+2%）
 - 加權平均 +0.5%~+1.5% → 溫和高開（預估 +0.3%~+1%）
 - 加權平均 -0.5%~+0.5% → 平開（預估 ±0.3%）
 - 加權平均 < -1.5% → 跳空低開
 嚴格以 JSON 格式回應（不要加 markdown code block）：
-{"gap_direction": "up"|"flat"|"down", "estimated_gap_pct": float, "key_driver": str, "tsm_signal": str, "reasoning": str}"""
+{"gap_direction": "up"|"flat"|"down", "estimated_gap_pct": float, "key_driver": str, "tsm_signal": str, "night_futures_used": bool, "reasoning": str}"""
 
 _CHIEF_SYSTEM = """你是台灣股期分析團隊的總合規劃師（Chief Strategist）。
 你將收到籌碼面報告與技術面報告，整合為一份「今日投報建議書」。
@@ -86,6 +109,7 @@ _CHIEF_SYSTEM = """你是台灣股期分析團隊的總合規劃師（Chief Stra
 輸入訊息末尾可能附帶以下補充資訊，請主動運用：
 - 【近期預測準確率】：過去 14 天方向預測記錄。若準確率低於 50%，須在盤勢定調中降低方向確信度，並說明謹慎原因。
 - 【歷史策略教訓】：過去相似市場環境下的失誤分類（方向誤判、過度自信、資料陳舊等）。若有相關教訓，請在分析中明確點出「本次注意：……」並調整判斷，避免重蹈相同錯誤。
+- 【今日財經新聞標題】：台灣股票相關新聞標題列表。用於識別重大事件（法說會、政策公告、產業消息）對盤面的潛在影響，但不得逐條列舉，應整合進分析論述中。
 
 嚴格遵守以下格式輸出：
 
@@ -233,7 +257,12 @@ def chip_analyst_node(state: WorkflowState) -> dict:
     run_id = state.get("run_id")
     logger.info("[ChipAnalyst] 開始籌碼分析")
     raw = state.get("raw_market_data") or {}
-    chip_data = {k: raw[k] for k in ("foreign_oi_net", "trust_oi_net", "dealer_oi_net") if k in raw}
+    _chip_keys = (
+        "foreign_oi_long", "foreign_oi_short", "foreign_oi_net",
+        "trust_oi_long", "trust_oi_short", "trust_oi_net",
+        "dealer_oi_long", "dealer_oi_short", "dealer_oi_net",
+    )
+    chip_data = {k: raw[k] for k in _chip_keys if k in raw}
     if not chip_data:
         chip_data = state["snapshot"]["tools"]["get_tw_future_chips"]["data"]
         emit_event(run_id, "fallback_activated", "chip_analyst",
@@ -263,15 +292,15 @@ def tech_analyst_node(state: WorkflowState) -> dict:
     run_id = state.get("run_id")
     logger.info("[TechnicalAnalyst] 開始技術面分析")
     raw = state.get("raw_market_data") or {}
-    us_keys = ("djia_chg_pct", "ndx_chg_pct", "sox_chg_pct", "tsm_adr_chg_pct")
-    us_data = {k: raw[k] for k in us_keys if k in raw}
+    us_keys = ("djia_chg_pct", "ndx_chg_pct", "sox_chg_pct", "tsm_adr_chg_pct", "night_futures_chg_pct")
+    us_data = {k: raw[k] for k in us_keys if k in raw and raw[k] is not None}
     if not us_data:
         us_data = state["snapshot"]["tools"]["get_us_market_summary"]["data"]["markets"]
         emit_event(run_id, "fallback_activated", "tech_analyst",
                    {"reason": "data_collector_empty",
                     "raw_bytes": len(json.dumps(us_data))}, severity="warn")
         logger.warning(f"[TechnicalAnalyst] Fallback: raw snapshot {len(json.dumps(us_data))} bytes")
-    user_content = f"昨日美股收盤數據：\n{json.dumps(us_data, ensure_ascii=False, indent=2)}"
+    user_content = f"技術面數據：\n{json.dumps(us_data, ensure_ascii=False, indent=2)}"
 
     start = time.monotonic()
     response = _llm(_MODEL_SONNET).invoke([
@@ -319,6 +348,20 @@ def chief_strategist_node(state: WorkflowState) -> dict:
             user_content += f"\n\n{lessons}"
     except Exception as exc:
         logger.debug(f"[ChiefStrategist] strategy lessons 載入失敗（略過）: {exc}")
+
+    # 方案一: inject financial news headlines from snapshot
+    try:
+        news_data = (state.get("snapshot") or {}).get("tools", {}).get("get_financial_news", {})
+        news_items = (news_data.get("data") or {}).get("news", [])
+        if news_items and not news_data.get("data", {}).get("error"):
+            headlines = "\n".join(f"・{item['title']}" for item in news_items[:10] if item.get("title"))
+            if headlines:
+                news_block = f"【今日財經新聞標題】\n{headlines}"
+                if len(news_block) > _CTX_LIMIT_CHIEF_NEWS_CHARS:
+                    news_block = news_block[:_CTX_LIMIT_CHIEF_NEWS_CHARS].rsplit("\n", 1)[0]
+                user_content += f"\n\n{news_block}"
+    except Exception as exc:
+        logger.debug(f"[ChiefStrategist] 新聞資料載入失敗（略過）: {exc}")
 
     start = time.monotonic()
     response = _llm_opus().invoke([

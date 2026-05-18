@@ -21,7 +21,7 @@ logger.add(sys.stdout, format="{time:HH:mm:ss} | {level:<8} | {message}", level=
 SNAPSHOT_FILE = Path("market_snapshot.json")
 JOURNAL_FILE  = Path("collection_journal.jsonl")
 
-TOOLS = ["get_tw_future_chips", "get_us_market_summary", "get_financial_news"]
+TOOLS = ["get_tw_future_chips", "get_us_market_summary", "get_financial_news", "get_tw_night_futures"]
 
 
 async def call_tool(
