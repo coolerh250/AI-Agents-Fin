@@ -149,7 +149,7 @@ def _run_post_alerts(run_id: str, result: dict, run_cost: float,
             alerts.append("🚨 [A-002] CRITICAL: 建議書未寫入 TiDB")
 
         # A-003: no successful delivery on any channel
-        delivery_ok = any(e["event_type"] == "delivery_success" for e in events)
+        delivery_ok = any(e["event_type"] in ("delivery_success", "delivery_dedup") for e in events)
         if not delivery_ok:
             alerts.append("🚨 [A-003] CRITICAL: LINE/Telegram 推播均失敗")
 

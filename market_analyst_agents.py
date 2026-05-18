@@ -435,6 +435,8 @@ def send_notification_node(state: WorkflowState) -> dict:
         )
         if result.get("dedup_skipped"):
             logger.info("[SendNotification] 今日已推播（dedup），略過")
+            emit_event(run_id, "delivery_dedup", "send_notification",
+                       {"reason": "already_sent_today"}, severity="info")
             return {}
         if result.get("error") == "unauthorized":
             logger.warning("[SendNotification] MCP_NOTIFY_TOKEN 未設定或錯誤，改用直接呼叫")
