@@ -358,7 +358,7 @@ with tab_portfolio:
                 column_config={
                     "id":       st.column_config.NumberColumn("ID",      disabled=True),
                     "代碼":     st.column_config.TextColumn("代碼",      disabled=True),
-                    "成本(元)": st.column_config.NumberColumn("成本(元)", disabled=True),
+                    "成本(元)": st.column_config.NumberColumn("成本(元)", min_value=0.01, step=0.5),
                     "股數":     st.column_config.NumberColumn("股數",     min_value=1, step=100),
                     "止損%":    st.column_config.NumberColumn("止損%",    min_value=0.1, max_value=50.0, step=0.5),
                     "策略":     st.column_config.SelectboxColumn("策略",  options=["波段", "長抱", "存股", "當沖"]),
@@ -375,6 +375,7 @@ with tab_portfolio:
                         int(row["股數"]),
                         float(row["止損%"]),
                         str(row["策略"]),
+                        entry_price=float(row["成本(元)"]),
                     )
                 st.cache_data.clear()
                 st.success("已儲存所有變更")

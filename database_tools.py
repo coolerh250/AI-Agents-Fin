@@ -316,6 +316,7 @@ def update_portfolio_item(
     quantity: int,
     stop_loss_level: float,
     strategy_type: str,
+    entry_price: Optional[float] = None,
     user_id: Optional[str] = None,
 ) -> None:
     with _engine().begin() as conn:
@@ -323,16 +324,29 @@ def update_portfolio_item(
             text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
         ).fetchone()
         before = dict(before_row._mapping) if before_row else {}
-        conn.execute(
-            text("""
-                UPDATE user_portfolio
-                SET quantity = :qty, stop_loss_level = :sl, strategy_type = :strat
-                WHERE id = :id
-                  AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
-            """),
-            {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type,
-             "id": item_id, "uid": user_id},
-        )
+        if entry_price is not None:
+            conn.execute(
+                text("""
+                    UPDATE user_portfolio
+                    SET quantity = :qty, stop_loss_level = :sl, strategy_type = :strat,
+                        entry_price = :entry
+                    WHERE id = :id
+                      AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+                """),
+                {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type,
+                 "entry": entry_price, "id": item_id, "uid": user_id},
+            )
+        else:
+            conn.execute(
+                text("""
+                    UPDATE user_portfolio
+                    SET quantity = :qty, stop_loss_level = :sl, strategy_type = :strat
+                    WHERE id = :id
+                      AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+                """),
+                {"qty": quantity, "sl": stop_loss_level, "strat": strategy_type,
+                 "id": item_id, "uid": user_id},
+            )
         after_row = conn.execute(
             text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
         ).fetchone()
