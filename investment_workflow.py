@@ -39,7 +39,7 @@ logger.add(
 )
 
 SNAPSHOT_FILE = Path("market_snapshot.json")
-_COST_ALERT_THRESHOLD_USD = 0.15
+_COST_ALERT_THRESHOLD_USD = 0.25
 _SNAPSHOT_WARN_HOURS      = 6
 _SNAPSHOT_ABORT_HOURS     = 12
 

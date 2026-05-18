@@ -54,7 +54,15 @@ def save_brief(
             {"d": trade_date, "brief": brief_text,
              "gap_pct": predicted_gap_pct, "direction": gap_direction},
         )
-        return result.lastrowid
+        row_id = result.lastrowid
+        if row_id == 0:
+            # ON DUPLICATE KEY UPDATE path — fetch existing row id
+            existing = conn.execute(
+                text("SELECT id FROM daily_briefs WHERE trade_date = :d LIMIT 1"),
+                {"d": trade_date},
+            ).fetchone()
+            row_id = int(existing[0]) if existing else 0
+        return row_id
 
 
 def get_brief(trade_date: date) -> Optional[dict]:
