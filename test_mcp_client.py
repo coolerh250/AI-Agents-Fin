@@ -1,9 +1,10 @@
 import asyncio
 import json
+import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from loguru import logger
-import sys
+from utils.mcp_env import system_env
 
 logger.remove()
 logger.add(sys.stdout, format="{time:HH:mm:ss} | {level} | {message}", level="DEBUG")
@@ -12,8 +13,8 @@ logger.add(sys.stdout, format="{time:HH:mm:ss} | {level} | {message}", level="DE
 async def main():
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "mcp_servers/system_inspector.py"],
-        env=None,
+        args=["run", "mcp_servers/system_server.py"],
+        env=system_env(),
     )
 
     logger.info("Connecting to System Inspector MCP Server...")

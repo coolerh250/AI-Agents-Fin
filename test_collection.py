@@ -5,7 +5,6 @@ saves market_snapshot.json and appends to collection_journal.jsonl.
 """
 import asyncio
 import json
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -14,12 +13,7 @@ from pathlib import Path
 from loguru import logger
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-_MCP_ENV = {
-    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-    "HOME": os.environ.get("HOME", ""),
-    "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-}
+from utils.mcp_env import market_data_env
 
 logger.remove()
 logger.add(sys.stdout, format="{time:HH:mm:ss} | {level:<8} | {message}", level="DEBUG")
@@ -53,8 +47,8 @@ async def main() -> None:
 
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "mcp_servers/finance_mcp_server.py"],
-        env=_MCP_ENV,
+        args=["run", "mcp_servers/market_data_server.py"],
+        env=market_data_env(),
     )
 
     async with stdio_client(server_params) as (read, write):

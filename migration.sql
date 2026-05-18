@@ -159,6 +159,13 @@ CREATE TABLE IF NOT EXISTS strategy_lessons (
 -- Step 10: Add lesson_quality_score to strategy_lessons (Flywheel Phase 2)
 ALTER TABLE strategy_lessons ADD COLUMN IF NOT EXISTS lesson_quality_score DECIMAL(3,1) NULL;
 
+-- Step 12: tool_audit_log — MCP server audit trail
+-- NOTE: This table was already created in Phase 6 (ensure_tool_audit_log_table in database_tools.py).
+-- The existing schema (tool_id, tool_type, caller, status, latency_ms, error_message, created_at)
+-- is reused by utils/mcp_audit.py with tool_id = "server.tool_name" and tool_type = "mcp".
+-- No new DDL required; the existing table is compatible.
+-- Indexes already present: idx_tal_tool (tool_id), idx_tal_created (created_at).
+
 -- Step 11: Fix daily_briefs unique key (Step 6 was non-unique; replace it)
 -- Idempotent: DROP ignores error if not exists; ADD UNIQUE uses IF NOT EXISTS
 -- Run manually if needed; ensure_observability_tables() handles this automatically.

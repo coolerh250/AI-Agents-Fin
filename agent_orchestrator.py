@@ -16,6 +16,7 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from utils.mcp_env import system_env
 
 load_dotenv()
 
@@ -57,15 +58,10 @@ class AgentState(TypedDict):
 
 async def _fetch_mcp_stats() -> dict:
     """Open stdio channel to system_inspector MCP server and call get_system_stats."""
-    _mcp_env = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", ""),
-        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-    }
     params = StdioServerParameters(
         command="uv",
-        args=["run", "mcp_servers/system_inspector.py"],
-        env=_mcp_env,
+        args=["run", "mcp_servers/system_server.py"],
+        env=system_env(),
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:

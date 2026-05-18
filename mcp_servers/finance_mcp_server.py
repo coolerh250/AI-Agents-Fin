@@ -1,15 +1,15 @@
 """
 finance_mcp_server.py
 Financial Data Collector — MCP Server for Taiwan Stock Futures Analysis Team
-Tools: get_tw_future_chips | get_us_market_summary | get_financial_news | save_brief_to_db | send_brief_to_user
-Resources: finance://backtest/report
+Tools: get_tw_future_chips | get_us_market_summary | get_financial_news
+DEPRECATED: use market_data_server.py (Phase 1B). Kept for one sprint rollback window.
 """
 import re
 import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 # Allow importing database_tools from the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -245,69 +245,6 @@ def get_financial_news() -> dict:
     except Exception as exc:
         logger.error(f"[get_financial_news] Failed: {exc}")
         return {"error": True, "message": str(exc), "source": "Anue API"}
-
-
-@mcp.tool()
-def save_brief_to_db(
-    trade_date: str,
-    brief_text: str,
-    predicted_gap_pct: Optional[float] = None,
-    gap_direction: Optional[str] = None,
-) -> dict:
-    """Save a ChiefStrategist brief to TiDB (agent_memory.daily_briefs).
-    trade_date must be YYYY-MM-DD format.
-    """
-    logger.info(f"Tool 'save_brief_to_db' invoked for {trade_date}")
-    try:
-        from database_tools import save_brief
-        from datetime import date as _date
-        d = _date.fromisoformat(trade_date)
-        row_id = save_brief(d, brief_text, predicted_gap_pct, gap_direction)
-        logger.success(f"[save_brief_to_db] Saved row id={row_id} for {trade_date}")
-        return {"success": True, "row_id": row_id, "trade_date": trade_date}
-    except Exception as exc:
-        logger.error(f"[save_brief_to_db] Failed: {exc}")
-        return {"success": False, "error": str(exc)}
-
-
-@mcp.tool()
-def send_brief_to_user(brief_text: str) -> dict:
-    """Send today's investment brief to Line/Telegram. Returns delivery status per channel."""
-    logger.info("Tool 'send_brief_to_user' invoked")
-    try:
-        from messenger_tools import send_brief
-        result = send_brief(brief_text)
-        logger.success(f"[send_brief_to_user] {result}")
-        return result
-    except Exception as exc:
-        logger.error(f"[send_brief_to_user] Failed: {exc}")
-        return {"error": True, "message": str(exc)}
-
-
-@mcp.resource("finance://backtest/report")
-def backtest_report_resource() -> str:
-    """Last 5 trading days prediction accuracy as a Markdown table."""
-    try:
-        from database_tools import get_recent_accuracy
-        rows = get_recent_accuracy(5)
-        if not rows:
-            return "⚠️ 尚無回測數據（請先執行 backtest_agent.py）"
-        lines = [
-            "| 日期 | 預測方向 | 預測跳空% | 實際跳空% | 誤差 |",
-            "|------|---------|---------|---------|------|",
-        ]
-        for r in rows:
-            pred = r.get("predicted_gap_pct")
-            actual = r.get("actual_gap_pct")
-            err = abs(round((pred or 0.0) - (actual or 0.0), 2)) if pred is not None else "-"
-            lines.append(
-                f"| {r['trade_date']} | {r.get('gap_direction') or '-'} | "
-                f"{pred if pred is not None else '-'} | {actual if actual is not None else '-'} | {err} |"
-            )
-        return "\n".join(lines)
-    except Exception as exc:
-        logger.error(f"[backtest_report_resource] {exc}")
-        return f"⚠️ 查詢失敗：{exc}"
 
 
 if __name__ == "__main__":

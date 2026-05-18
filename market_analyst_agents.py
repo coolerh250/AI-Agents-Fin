@@ -415,7 +415,6 @@ def send_notification_node(state: WorkflowState) -> dict:
     from telemetry import emit_event
     run_id = state.get("run_id")
     logger.info("[SendNotification] 推播 LINE / Telegram")
-    from messenger_tools import send_line, send_telegram
 
     report = state.get("final_report", "")
     if not report:
@@ -424,22 +423,49 @@ def send_notification_node(state: WorkflowState) -> dict:
                    {"reason": "empty_final_report"}, severity="error")
         return {}
 
-    results = {
-        "line":     send_line(report),
-        "telegram": send_telegram(report),
-    }
-    for channel, res in results.items():
-        status = res.get("status")
-        if status == "ok":
-            logger.success(f"[SendNotification] {channel} 推播成功")
-            emit_event(run_id, "delivery_success", "send_notification",
-                       {"channel": channel}, severity="info")
-        elif status == "skipped":
-            logger.info(f"[SendNotification] {channel} 略過（{res.get('reason', '')}）")
-        else:
-            logger.warning(f"[SendNotification] {channel} 推播失敗：{res.get('error', '')}")
-            emit_event(run_id, "delivery_failure", "send_notification",
-                       {"channel": channel, "error": res.get("error", "")}, severity="error")
+    try:
+        from utils.mcp_call import call_mcp_tool_sync
+        result = call_mcp_tool_sync(
+            server_script="mcp_servers/notification_server.py",
+            tool_name="push_investment_brief",
+            arguments={
+                "brief_text": report,
+                "api_key":    os.getenv("MCP_NOTIFY_TOKEN", ""),
+            },
+        )
+        if result.get("dedup_skipped"):
+            logger.info("[SendNotification] 今日已推播（dedup），略過")
+            return {}
+        if result.get("error") == "unauthorized":
+            logger.warning("[SendNotification] MCP_NOTIFY_TOKEN 未設定或錯誤，改用直接呼叫")
+            raise RuntimeError("unauthorized")
+        for channel in ("line", "telegram"):
+            res = result.get(channel, {})
+            status = res.get("status")
+            if status == "ok":
+                logger.success(f"[SendNotification] {channel} 推播成功")
+                emit_event(run_id, "delivery_success", "send_notification",
+                           {"channel": channel}, severity="info")
+            elif status == "skipped":
+                logger.info(f"[SendNotification] {channel} 略過（{res.get('reason', '')}）")
+            else:
+                logger.warning(f"[SendNotification] {channel} 推播失敗：{res.get('error', '')}")
+                emit_event(run_id, "delivery_failure", "send_notification",
+                           {"channel": channel, "error": res.get("error", "")}, severity="error")
+    except Exception as mcp_exc:
+        logger.warning(f"[SendNotification] MCP call 失敗，改用直接呼叫: {mcp_exc}")
+        from messenger_tools import send_line, send_telegram
+        results = {"line": send_line(report), "telegram": send_telegram(report)}
+        for channel, res in results.items():
+            status = res.get("status")
+            if status == "ok":
+                logger.success(f"[SendNotification] {channel} 推播成功（直接呼叫）")
+                emit_event(run_id, "delivery_success", "send_notification",
+                           {"channel": channel}, severity="info")
+            elif status != "skipped":
+                logger.warning(f"[SendNotification] {channel} 推播失敗：{res.get('error', '')}")
+                emit_event(run_id, "delivery_failure", "send_notification",
+                           {"channel": channel, "error": res.get("error", "")}, severity="error")
     return {}
 
 
@@ -450,8 +476,6 @@ def save_to_db_node(state: WorkflowState) -> dict:
     run_id = state.get("run_id")
     logger.info("[SaveToDB] 寫入 TiDB agent_memory.daily_briefs")
     try:
-        from database_tools import save_brief
-
         brief = state["final_brief"]
         trade_date = date.fromisoformat(state["snapshot"]["timestamp"][:10])
 
@@ -469,7 +493,28 @@ def save_to_db_node(state: WorkflowState) -> dict:
             emit_event(run_id, "output_invalid", "tech_analyst",
                        {"reason": "json_parse_failed_in_save_to_db"}, severity="warn")
 
-        row_id = save_brief(trade_date, brief, gap_pct, gap_dir)
+        row_id = 0
+        try:
+            from utils.mcp_call import call_mcp_tool_sync
+            result = call_mcp_tool_sync(
+                server_script="mcp_servers/persistence_server.py",
+                tool_name="save_brief",
+                arguments={
+                    "trade_date":        str(trade_date),
+                    "brief_text":        brief,
+                    "predicted_gap_pct": gap_pct,
+                    "gap_direction":     gap_dir,
+                    "_api_key":          os.getenv("MCP_WRITE_TOKEN", ""),
+                },
+            )
+            if not result.get("success"):
+                logger.warning(f"[SaveToDB] persistence_server 回傳錯誤: {result.get('error')}")
+            row_id = result.get("row_id", 0) or 0
+        except Exception as mcp_exc:
+            logger.warning(f"[SaveToDB] MCP call 失敗，改用直接呼叫: {mcp_exc}")
+            from database_tools import save_brief as _save_brief
+            row_id = _save_brief(trade_date, brief, gap_pct, gap_dir)
+
         logger.success(f"[SaveToDB] 寫入成功 row_id={row_id}, date={trade_date}")
         emit_event(run_id, "node_success", "save_to_db",
                    {"row_id": row_id, "trade_date": str(trade_date)}, severity="info")
