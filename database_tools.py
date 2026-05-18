@@ -38,21 +38,24 @@ def save_brief(
     brief_text: str,
     predicted_gap_pct: Optional[float],
     gap_direction: Optional[str],
+    line_report: Optional[str] = None,
 ) -> int:
     """Upsert daily brief (one per trade_date). Returns the row id."""
     with _engine().begin() as conn:
         result = conn.execute(
             text("""
                 INSERT INTO daily_briefs
-                    (trade_date, brief_text, predicted_gap_pct, gap_direction)
-                VALUES (:d, :brief, :gap_pct, :direction)
+                    (trade_date, brief_text, predicted_gap_pct, gap_direction, line_report)
+                VALUES (:d, :brief, :gap_pct, :direction, :line_report)
                 ON DUPLICATE KEY UPDATE
                     brief_text        = VALUES(brief_text),
                     predicted_gap_pct = VALUES(predicted_gap_pct),
-                    gap_direction     = VALUES(gap_direction)
+                    gap_direction     = VALUES(gap_direction),
+                    line_report       = VALUES(line_report)
             """),
             {"d": trade_date, "brief": brief_text,
-             "gap_pct": predicted_gap_pct, "direction": gap_direction},
+             "gap_pct": predicted_gap_pct, "direction": gap_direction,
+             "line_report": line_report},
         )
         row_id = result.lastrowid
         if row_id == 0:
@@ -70,7 +73,8 @@ def get_brief(trade_date: date) -> Optional[dict]:
     with _engine().connect() as conn:
         row = conn.execute(
             text("""
-                SELECT id, trade_date, brief_text, predicted_gap_pct, gap_direction, created_at
+                SELECT id, trade_date, brief_text, predicted_gap_pct, gap_direction,
+                       line_report, created_at
                 FROM daily_briefs
                 WHERE trade_date = :d
                 ORDER BY id DESC LIMIT 1
@@ -493,6 +497,7 @@ def ensure_observability_tables() -> None:
         ("ALTER TABLE cost_logs ADD COLUMN run_id VARCHAR(36) DEFAULT NULL", "add run_id"),
         ("ALTER TABLE cost_logs ADD INDEX idx_cost_run_id (run_id)", "add idx_cost_run_id"),
         ("ALTER TABLE daily_briefs ADD UNIQUE KEY uq_trade_date (trade_date)", "add uq_trade_date"),
+        ("ALTER TABLE daily_briefs ADD COLUMN line_report TEXT NULL", "add line_report"),
     ]:
         try:
             with _engine().begin() as conn:

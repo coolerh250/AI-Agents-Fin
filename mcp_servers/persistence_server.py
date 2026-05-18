@@ -47,6 +47,7 @@ def save_brief(
     brief_text: str,
     predicted_gap_pct: Optional[float] = None,
     gap_direction: Optional[str] = None,
+    line_report: Optional[str] = None,
     api_key: str = "",
 ) -> dict:
     """Save daily investment brief to TiDB daily_briefs. Upserts on trade_date.
@@ -59,7 +60,7 @@ def save_brief(
         with audit_tool("persistence", "save_brief"):
             from database_tools import save_brief as _save_brief
             d = _date.fromisoformat(trade_date)
-            row_id = _save_brief(d, brief_text, predicted_gap_pct, gap_direction)
+            row_id = _save_brief(d, brief_text, predicted_gap_pct, gap_direction, line_report)
             logger.success(f"[save_brief] row_id={row_id} trade_date={trade_date}")
             return {"success": True, "row_id": row_id, "error": None}
     except Exception as exc:

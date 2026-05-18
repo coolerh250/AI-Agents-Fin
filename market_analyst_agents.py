@@ -496,6 +496,7 @@ def save_to_db_node(state: WorkflowState) -> dict:
                        {"reason": "json_parse_failed_in_save_to_db"}, severity="warn")
 
         row_id = 0
+        line_report = state.get("final_report") or None
         try:
             from utils.mcp_call import call_mcp_tool_sync
             result = call_mcp_tool_sync(
@@ -506,6 +507,7 @@ def save_to_db_node(state: WorkflowState) -> dict:
                     "brief_text":        brief,
                     "predicted_gap_pct": gap_pct,
                     "gap_direction":     gap_dir,
+                    "line_report":       line_report,
                     "api_key":           os.getenv("MCP_WRITE_TOKEN", ""),
                 },
             )
@@ -515,7 +517,7 @@ def save_to_db_node(state: WorkflowState) -> dict:
         except Exception as mcp_exc:
             logger.warning(f"[SaveToDB] MCP call 失敗，改用直接呼叫: {mcp_exc}")
             from database_tools import save_brief as _save_brief
-            row_id = _save_brief(trade_date, brief, gap_pct, gap_dir)
+            row_id = _save_brief(trade_date, brief, gap_pct, gap_dir, line_report)
 
         logger.success(f"[SaveToDB] 寫入成功 row_id={row_id}, date={trade_date}")
         emit_event(run_id, "node_success", "save_to_db",

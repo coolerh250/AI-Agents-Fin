@@ -172,6 +172,11 @@ ALTER TABLE strategy_lessons ADD COLUMN IF NOT EXISTS lesson_quality_score DECIM
 ALTER TABLE daily_briefs DROP INDEX IF EXISTS idx_trade_date;
 ALTER TABLE daily_briefs ADD UNIQUE KEY IF NOT EXISTS uq_db_trade_date (trade_date);
 
+-- Step 14: Add line_report column to daily_briefs
+-- Stores the LINE-formatted report (final_report) so it can be resent without re-running the workflow.
+-- Applied automatically by ensure_observability_tables() in database_tools.py
+ALTER TABLE daily_briefs ADD COLUMN IF NOT EXISTS line_report TEXT NULL;
+
 -- Step 13: stock_info — stock code to company name mapping
 -- One row per stock_id. Synced from TWSE on demand (only missing portfolio codes).
 -- Created automatically by ensure_stock_info_table() in database_tools.py
