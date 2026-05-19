@@ -77,10 +77,8 @@ def push_investment_brief(brief_text: str, api_key: str = "") -> dict:
                 "dedup_skipped": True}
 
     try:
-        from messenger_tools import format_brief, send_line, send_telegram
-        message = format_brief(brief_text)
-        if len(message) > 4000:
-            message = message[:4000]
+        from messenger_tools import send_line, send_telegram
+        message = brief_text[:4000]
 
         with audit_tool("notification", "push_investment_brief"):
             line_result = send_line(message)

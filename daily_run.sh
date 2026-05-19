@@ -19,20 +19,32 @@ uv run test_collection.py
 echo "[$(ts)] Step 2: 分析團隊執行 + 建議書存入 DB"
 uv run investment_workflow.py
 
-echo "[$(ts)] Step 3: 傳送今日建議書"
+echo "[$(ts)] Step 3: 傳送今日建議書（fallback，workflow 已推播則略過）"
 uv run python - <<'PYEOF'
-from database_tools import get_brief
+from database_tools import _engine, get_brief
 from messenger_tools import send_brief
+from sqlalchemy import text as sql_text
 from datetime import date
 import json
 
-r = get_brief(date.today())
-if r:
-    text = r.get("line_report") or r["brief_text"]
-    result = send_brief(text)
-    print(f"推播結果: {json.dumps(result, ensure_ascii=False)}")
+engine = _engine()
+with engine.connect() as conn:
+    already_sent = conn.execute(sql_text(
+        "SELECT COUNT(*) FROM tool_audit_log"
+        " WHERE tool_id = 'notification.push_investment_brief'"
+        " AND status = 'ok' AND DATE(created_at) = :d"
+    ), {"d": str(date.today())}).scalar() or 0
+
+if already_sent:
+    print("今日已由 workflow 推播，Step 3 略過")
 else:
-    print("⚠️  今日建議書不存在，略過推播")
+    r = get_brief(date.today())
+    if r:
+        content = r.get("line_report") or r["brief_text"]
+        result = send_brief(content)
+        print(f"推播結果: {json.dumps(result, ensure_ascii=False)}")
+    else:
+        print("⚠️  今日建議書不存在，略過推播")
 PYEOF
 
 echo "[$(ts)] Step 4: Agent 品質評估"

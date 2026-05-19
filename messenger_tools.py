@@ -73,9 +73,8 @@ def send_telegram(message: str) -> dict:
 
 
 def send_brief(brief_text: str) -> dict:
-    """Format and send the investment brief to all configured channels."""
-    message = format_brief(brief_text)
+    """Send the investment brief to all configured channels. Text is sent as-is."""
     return {
-        "line":     send_line(message),
-        "telegram": send_telegram(message),
+        "line":     send_line(brief_text[:_LINE_MAX]),
+        "telegram": send_telegram(brief_text[:_TG_MAX]),
     }
