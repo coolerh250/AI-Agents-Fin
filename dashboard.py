@@ -54,6 +54,8 @@ def _require_auth() -> None:
 _require_auth()
 st.title("📈 台股期貨量化工作室")
 
+_PORTFOLIO_USER_ID = os.getenv("LINE_USER_ID") or None
+
 
 # ── Cached P&L fetch (5-minute TTL) ──────────────────────────────────────────
 
@@ -64,7 +66,7 @@ def _fetch_pnl(holdings_json: str) -> list[dict]:
 
 
 def load_pnl() -> list[dict]:
-    holdings = get_portfolio()
+    holdings = get_portfolio(_PORTFOLIO_USER_ID)
     if not holdings:
         return []
     return _fetch_pnl(json.dumps(holdings, default=str))
@@ -292,6 +294,7 @@ with tab_portfolio:
                 ok = add_portfolio_item(
                     new_stock.strip().upper(),
                     new_entry, int(new_qty), new_sl, new_strat,
+                    user_id=_PORTFOLIO_USER_ID,
                 )
                 if ok:
                     st.success(f"已新增 {new_stock.strip().upper()}")
@@ -376,6 +379,7 @@ with tab_portfolio:
                         float(row["止損%"]),
                         str(row["策略"]),
                         entry_price=float(row["成本(元)"]),
+                        user_id=_PORTFOLIO_USER_ID,
                     )
                 st.cache_data.clear()
                 st.success("已儲存所有變更")
@@ -389,7 +393,7 @@ with tab_portfolio:
                 }
                 selected = st.selectbox("選擇要刪除的持倉", list(options.keys()))
                 if st.button("確認刪除", type="primary"):
-                    delete_portfolio_item(options[selected])
+                    delete_portfolio_item(options[selected], user_id=_PORTFOLIO_USER_ID)
                     st.cache_data.clear()
                     st.success(f"已刪除：{selected}")
                     st.rerun()
