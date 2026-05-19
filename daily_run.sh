@@ -28,7 +28,8 @@ import json
 
 r = get_brief(date.today())
 if r:
-    result = send_brief(r["brief_text"])
+    text = r.get("line_report") or r["brief_text"]
+    result = send_brief(text)
     print(f"推播結果: {json.dumps(result, ensure_ascii=False)}")
 else:
     print("⚠️  今日建議書不存在，略過推播")
