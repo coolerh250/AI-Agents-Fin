@@ -466,6 +466,67 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     return {"portfolio_advice": result}
 
 
+def generate_portfolio_analysis_for_user(
+    user_id: str,
+    daily_brief_context: str,
+    model: str = _MODEL_HAIKU,
+) -> str:
+    """Generate personalized portfolio analysis for a single LINE user.
+    Called from daily_run.sh for non-owner users after the main workflow completes.
+    Uses Haiku by default for cost efficiency (~$0.01-0.02 per user)."""
+    from portfolio_tools import get_user_portfolio, calculate_pnl
+    from database_tools import get_stock_name
+
+    holdings = get_user_portfolio(user_id=user_id)
+    if not holdings:
+        logger.info(f"[PortfolioAnalysis] {user_id[:12]}... 無持倉資料，略過")
+        return ""
+
+    try:
+        enriched = calculate_pnl(holdings)
+    except Exception as exc:
+        logger.warning(f"[PortfolioAnalysis] calculate_pnl 失敗: {exc}")
+        enriched = holdings
+
+    pnl_lines = []
+    for h in enriched:
+        line = (
+            f"股票代碼: {h['stock_id']} {get_stock_name(h['stock_id']) or ''} | "
+            f"成本: {h['entry_price']} | 現價: {h.get('current_price', h['entry_price']):.2f} | "
+            f"持股數: {h['quantity']} 股 | 損益: {h.get('unrealized_pnl', 0):.2f} "
+            f"({h.get('pnl_pct', 0):.2f}%) | "
+            f"止損觸發: {'是' if h.get('stop_loss_triggered') else '否'} | 策略: {h['strategy_type']}"
+        )
+        if h.get("rsi_14") is not None:
+            line += f" | RSI14={h['rsi_14']} MA5={h['ma5']} MA20={h['ma20']}({h['price_vs_ma20']})"
+        if h.get("institution_net") is not None:
+            fn = (h["foreign_net"] or 0) // 1000
+            tn = (h["trust_net"] or 0) // 1000
+            line += f" | 外資{fn:+d}千股 投信{tn:+d}千股"
+        pnl_lines.append(line)
+
+    portfolio_block = "\n".join(pnl_lines)
+    user_content = (
+        f"今日市場展望：\n{daily_brief_context}\n\n"
+        f"使用者持倉損益：\n{portfolio_block[:_CTX_LIMIT_PORTFOLIO_CHARS]}"
+    )
+
+    start = time.monotonic()
+    response = _llm(model, max_tokens=800).invoke([
+        SystemMessage(content=_PORTFOLIO_SYSTEM),
+        HumanMessage(content=user_content),
+    ])
+    latency_ms = int((time.monotonic() - start) * 1000)
+    _record_usage(
+        "portfolio_manager_ext", model, response, latency_ms,
+        system_prompt=_PORTFOLIO_SYSTEM, user_content=user_content,
+    )
+
+    result = _extract_text(response)
+    logger.success(f"[PortfolioAnalysis] {user_id[:12]}... 持股診斷完成")
+    return result
+
+
 # ── Node: FormatAgent (Haiku) ─────────────────────────────────────────────────
 
 def format_agent_node(state: WorkflowState) -> dict:

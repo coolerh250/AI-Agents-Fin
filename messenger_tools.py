@@ -78,3 +78,28 @@ def send_brief(brief_text: str) -> dict:
         "line":     send_line(brief_text[:_LINE_MAX]),
         "telegram": send_telegram(brief_text[:_TG_MAX]),
     }
+
+
+def send_line_to_user(user_id: str, message: str) -> dict:
+    """Push a message to a specific LINE user by user_id (not the default LINE_USER_ID)."""
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+    if not token:
+        return {"status": "skipped", "reason": "LINE_CHANNEL_ACCESS_TOKEN not set"}
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                _LINE_PUSH_API,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "to": user_id,
+                    "messages": [{"type": "text", "text": message[:_LINE_MAX]}],
+                },
+            )
+            resp.raise_for_status()
+        return {"status": "ok", "channel": "line", "user_id": user_id,
+                "http_status": resp.status_code}
+    except Exception as exc:
+        return {"status": "error", "channel": "line", "user_id": user_id, "error": str(exc)}

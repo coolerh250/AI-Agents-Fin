@@ -26,6 +26,7 @@ from loguru import logger
 
 from database_tools import (
     add_portfolio_item,
+    create_login_token,
     delete_portfolio_by_stock,
     get_portfolio,
     update_portfolio_entry_price,
@@ -148,12 +149,21 @@ _HELP_TEXT = """\
 新增 2330 1000 850        — 簡短格式
 刪除 2330        — 刪除持倉
 更新 2330 成本900 — 修改成本價
+登入代碼         — 取得 Dashboard 登入代碼
 
 每個帳號的資料互相隔離。"""
 
 
 def _dispatch(user_id: str, text: str) -> str:
     text = text.strip()
+    if text in ("登入代碼", "login", "Login", "登入"):
+        token = create_login_token(user_id)
+        return (
+            f"🔑 您的 Dashboard 登入代碼：\n\n"
+            f"  {token}\n\n"
+            f"5 分鐘內有效，請立即在 Dashboard 輸入。\n"
+            f"⚠️ 請勿將代碼告知他人"
+        )
     if text in ("查詢持股", "持股", "查詢", "portfolio"):
         return _handle_query(user_id)
     if text in ("說明", "help", "?", "？"):

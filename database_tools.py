@@ -4,6 +4,8 @@ SQLAlchemy/PyMySQL helpers for agent_memory on TiDB.
 """
 import json as _json
 import os
+import secrets
+import string
 from datetime import date
 from functools import lru_cache
 from typing import Optional
@@ -504,6 +506,7 @@ def ensure_observability_tables() -> None:
     ensure_eval_tables()                # Evaluation Framework
     ensure_strategy_lessons_table()     # Adaptive Flywheel Phase 1
     ensure_stock_info_table()           # Stock code → company name mapping
+    ensure_login_tokens_table()         # LINE OTP login
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1551,4 +1554,87 @@ def get_portfolio_missing_names() -> list:
         return [r[0] for r in rows]
     except Exception as exc:
         logger.warning(f"[stock_info] get_portfolio_missing_names failed: {exc}")
+        return []
+
+
+# ── LINE OTP Login Tokens ──────────────────────────────────────────────────────
+
+def ensure_login_tokens_table() -> None:
+    """Create login_tokens table for dashboard OTP authentication. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS login_tokens (
+                    id           BIGINT       AUTO_INCREMENT PRIMARY KEY,
+                    token        VARCHAR(16)  NOT NULL UNIQUE,
+                    line_user_id VARCHAR(50)  NOT NULL,
+                    expires_at   TIMESTAMP    NOT NULL,
+                    used         TINYINT      NOT NULL DEFAULT 0,
+                    created_at   TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_lt_token   (token),
+                    INDEX idx_lt_expires (expires_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_login_tokens_table failed: {exc}")
+
+
+def create_login_token(line_user_id: str) -> str:
+    """Generate an 8-char OTP token for the given LINE user, valid for 5 minutes.
+    Any previous unused tokens for this user are deleted first."""
+    _CHARS = string.ascii_uppercase + string.digits
+    token = "".join(secrets.choice(_CHARS) for _ in range(8))
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("DELETE FROM login_tokens WHERE line_user_id = :uid AND used = 0"),
+                {"uid": line_user_id},
+            )
+            conn.execute(
+                text("""
+                    INSERT INTO login_tokens (token, line_user_id, expires_at)
+                    VALUES (:token, :uid, NOW() + INTERVAL 5 MINUTE)
+                """),
+                {"token": token, "uid": line_user_id},
+            )
+    except Exception as exc:
+        logger.warning(f"[login_tokens] create_login_token failed: {exc}")
+    return token
+
+
+def consume_login_token(token: str) -> Optional[str]:
+    """Validate and consume an OTP token. Returns the LINE user_id, or None if invalid/expired."""
+    try:
+        with _engine().begin() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT id, line_user_id FROM login_tokens
+                    WHERE token = :t AND used = 0 AND expires_at > NOW()
+                """),
+                {"t": token},
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                text("UPDATE login_tokens SET used = 1 WHERE id = :id"),
+                {"id": row[0]},
+            )
+            return row[1]
+    except Exception as exc:
+        logger.warning(f"[login_tokens] consume_login_token failed: {exc}")
+        return None
+
+
+def get_all_portfolio_users() -> list[str]:
+    """Return all distinct non-null line_user_id values in user_portfolio."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT line_user_id FROM user_portfolio
+                WHERE line_user_id IS NOT NULL
+                ORDER BY line_user_id
+            """)).fetchall()
+        return [r[0] for r in rows]
+    except Exception as exc:
+        logger.warning(f"[portfolio] get_all_portfolio_users failed: {exc}")
         return []

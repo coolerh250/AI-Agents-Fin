@@ -34,27 +34,58 @@ st.set_page_config(page_title="量化工作室看板", layout="wide")
 
 
 def _require_auth() -> None:
-    """Password gate. Skipped if DASH_PASSWORD is not set (backward-compatible)."""
-    dash_pass = os.getenv("DASH_PASSWORD", "")
-    if not dash_pass:
-        return
+    """LINE OTP login (primary) with DASH_PASSWORD admin fallback."""
     if st.session_state.get("authenticated"):
         return
+
     st.title("🔐 登入")
-    pwd = st.text_input("密碼", type="password")
-    if st.button("登入"):
-        if pwd == dash_pass:
-            st.session_state.authenticated = True
-            st.rerun()
+    tab_line, tab_admin = st.tabs(["📱 LINE 登入", "🔧 管理員"])
+
+    with tab_line:
+        st.info("請先在 LINE Bot 傳送「**登入代碼**」，再將收到的 8 位代碼輸入於此")
+        code = st.text_input("登入代碼", max_chars=8, placeholder="AB12CD34")
+        if st.button("登入", key="line_login"):
+            from database_tools import consume_login_token
+            uid = consume_login_token(code.strip().upper())
+            if uid:
+                st.session_state.authenticated = True
+                st.session_state.line_user_id = uid
+                st.session_state.auth_method = "line"
+                st.rerun()
+            else:
+                st.error("代碼無效、已過期或已使用")
+
+    with tab_admin:
+        dash_pass = os.getenv("DASH_PASSWORD", "")
+        if dash_pass:
+            pwd = st.text_input("密碼", type="password", key="admin_pwd")
+            if st.button("登入", key="admin_login"):
+                if pwd == dash_pass:
+                    st.session_state.authenticated = True
+                    st.session_state.line_user_id = os.getenv("LINE_USER_ID") or None
+                    st.session_state.auth_method = "password"
+                    st.rerun()
+                else:
+                    st.error("密碼錯誤")
         else:
-            st.error("密碼錯誤")
+            st.info("未設定管理員密碼（DASH_PASSWORD）")
+
     st.stop()
 
 
 _require_auth()
 st.title("📈 台股期貨量化工作室")
 
-_PORTFOLIO_USER_ID = os.getenv("LINE_USER_ID") or None
+# ── Sidebar: logged-in user + logout ─────────────────────────────────────────
+with st.sidebar:
+    _auth_method = st.session_state.get("auth_method", "")
+    _sid = st.session_state.get("line_user_id") or ""
+    _label = "管理員" if _auth_method == "password" else (f"LINE: {_sid[:15]}..." if _sid else "未知")
+    st.caption(f"已登入：{_label}")
+    if st.button("登出"):
+        for _k in ("authenticated", "line_user_id", "auth_method"):
+            st.session_state.pop(_k, None)
+        st.rerun()
 
 
 # ── Cached P&L fetch (5-minute TTL) ──────────────────────────────────────────
@@ -65,8 +96,8 @@ def _fetch_pnl(holdings_json: str) -> list[dict]:
     return calculate_pnl(json.loads(holdings_json))
 
 
-def load_pnl() -> list[dict]:
-    holdings = get_portfolio(_PORTFOLIO_USER_ID)
+def load_pnl(user_id) -> list[dict]:
+    holdings = get_portfolio(user_id)
     if not holdings:
         return []
     return _fetch_pnl(json.dumps(holdings, default=str))
@@ -274,6 +305,7 @@ with tab_cost:
 # ── Tab 3: Portfolio Management ───────────────────────────────────────────────
 
 with tab_portfolio:
+    _current_uid = st.session_state.get("line_user_id")
     col_form, col_main = st.columns([1, 3])
 
     # ── Add holding form (left column) ───────────────────────────────────────
@@ -294,7 +326,7 @@ with tab_portfolio:
                 ok = add_portfolio_item(
                     new_stock.strip().upper(),
                     new_entry, int(new_qty), new_sl, new_strat,
-                    user_id=_PORTFOLIO_USER_ID,
+                    user_id=_current_uid,
                 )
                 if ok:
                     st.success(f"已新增 {new_stock.strip().upper()}")
@@ -305,7 +337,7 @@ with tab_portfolio:
 
     # ── Holdings P&L (right column) ──────────────────────────────────────────
     with col_main:
-        pnl_rows = load_pnl()
+        pnl_rows = load_pnl(_current_uid)
 
         if not pnl_rows:
             st.info("尚無持倉資料 — 請使用左側表單新增持倉")
@@ -379,7 +411,7 @@ with tab_portfolio:
                         float(row["止損%"]),
                         str(row["策略"]),
                         entry_price=float(row["成本(元)"]),
-                        user_id=_PORTFOLIO_USER_ID,
+                        user_id=_current_uid,
                     )
                 st.cache_data.clear()
                 st.success("已儲存所有變更")
@@ -393,7 +425,7 @@ with tab_portfolio:
                 }
                 selected = st.selectbox("選擇要刪除的持倉", list(options.keys()))
                 if st.button("確認刪除", type="primary"):
-                    delete_portfolio_item(options[selected], user_id=_PORTFOLIO_USER_ID)
+                    delete_portfolio_item(options[selected], user_id=_current_uid)
                     st.cache_data.clear()
                     st.success(f"已刪除：{selected}")
                     st.rerun()

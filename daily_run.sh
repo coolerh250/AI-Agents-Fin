@@ -19,6 +19,33 @@ uv run test_collection.py
 echo "[$(ts)] Step 2: 分析團隊執行 + 建議書存入 DB"
 uv run investment_workflow.py
 
+echo "[$(ts)] Step 2.5: 發送個人化持股分析給非擁有者使用者"
+uv run python - <<'PYEOF'
+import os
+import json
+from datetime import date
+from database_tools import get_all_portfolio_users, get_brief
+from market_analyst_agents import generate_portfolio_analysis_for_user
+from messenger_tools import send_line_to_user
+
+owner_id = os.getenv("LINE_USER_ID") or None
+all_users = get_all_portfolio_users()
+non_owners = [u for u in all_users if u != owner_id]
+
+if not non_owners:
+    print("無其他持倉使用者，Step 2.5 略過")
+else:
+    brief = get_brief(date.today())
+    brief_context = (brief.get("line_report") or brief.get("brief_text") or "") if brief else ""
+    for uid in non_owners:
+        analysis = generate_portfolio_analysis_for_user(uid, brief_context)
+        if analysis:
+            result = send_line_to_user(uid, analysis)
+            print(f"  → {uid[:15]}... 推播結果: {json.dumps(result, ensure_ascii=False)}")
+        else:
+            print(f"  → {uid[:15]}... 無持倉資料，略過")
+PYEOF
+
 echo "[$(ts)] Step 3: 傳送今日建議書（fallback，workflow 已推播則略過）"
 uv run python - <<'PYEOF'
 from database_tools import _engine, get_brief
