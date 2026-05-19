@@ -9,6 +9,9 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from database_tools import (
     add_portfolio_item,
