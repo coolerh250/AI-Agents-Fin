@@ -23,7 +23,7 @@ _OWNER_LINE_ID: Optional[str] = os.getenv("LINE_USER_ID") or None
 _CTX_LIMIT_CHIEF_HISTORY_CHARS  = 800   # max chars for injected SQL history
 _CTX_LIMIT_CHIEF_LESSONS_CHARS  = 600   # max chars for strategy lessons context
 _CTX_LIMIT_CHIEF_NEWS_CHARS     = 800   # max chars for financial news headlines
-_CTX_LIMIT_PORTFOLIO_CHARS      = 3000  # max chars for portfolio PnL block
+_CTX_LIMIT_PORTFOLIO_CHARS      = 5000  # max chars for portfolio block (raised for tech indicators + institution flows)
 
 _MODEL_HAIKU  = "claude-haiku-4-5-20251001"
 _MODEL_SONNET = "claude-sonnet-4-6"
@@ -134,8 +134,11 @@ _PORTFOLIO_SYSTEM = """你是一個私人資產顧問，請結合 ChiefStrategis
 請針對每筆持股給出具體建議，格式如下：
 【股票代碼：XXXX】
 - 現價：XXX 元（成本：XXX 元，損益：±X.X%）
+- 技術面：RSI=XX，現價在 MA20 XX 方（若資料可用）
+- 法人動向：外資 XX 千股，投信 XX 千股（若資料可用）
+- 相關新聞：（若有個股新聞則引述標題）
 - 建議動作：（買入/續抱/減碼/賣出）
-- 原因：（一句話）"""
+- 原因：（一至兩句話，結合技術面與法人動向）"""
 
 _FORMAT_SYSTEM = """你是 LINE 推播格式化 Agent。
 將投報建議書重新排版為適合手機閱讀的 LINE 訊息：
@@ -403,16 +406,50 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
         enriched = holdings  # bare fallback if calculate_pnl itself raises
 
     from database_tools import get_stock_name
-    pnl_lines = [
-        f"股票代碼: {h['stock_id']} {get_stock_name(h['stock_id']) or ''} | 成本: {h['entry_price']} | 現價: {h.get('current_price', h['entry_price']):.2f} | "
-        f"持股數: {h['quantity']} 股 | 損益: {h.get('unrealized_pnl', 0):.2f} ({h.get('pnl_pct', 0):.2f}%) | "
-        f"止損觸發: {'是' if h.get('stop_loss_triggered') else '否'} | 策略: {h['strategy_type']}"
-        for h in enriched
-    ]
-    portfolio_block = "\n".join(pnl_lines)[:_CTX_LIMIT_PORTFOLIO_CHARS]
+    pnl_lines = []
+    for h in enriched:
+        line = (
+            f"股票代碼: {h['stock_id']} {get_stock_name(h['stock_id']) or ''} | "
+            f"成本: {h['entry_price']} | 現價: {h.get('current_price', h['entry_price']):.2f} | "
+            f"持股數: {h['quantity']} 股 | 損益: {h.get('unrealized_pnl', 0):.2f} "
+            f"({h.get('pnl_pct', 0):.2f}%) | "
+            f"止損觸發: {'是' if h.get('stop_loss_triggered') else '否'} | 策略: {h['strategy_type']}"
+        )
+        if h.get("rsi_14") is not None:
+            line += f" | RSI14={h['rsi_14']} MA5={h['ma5']} MA20={h['ma20']}({h['price_vs_ma20']})"
+        if h.get("institution_net") is not None:
+            fn = (h["foreign_net"] or 0) // 1000
+            tn = (h["trust_net"] or 0) // 1000
+            line += f" | 外資{fn:+d}千股 投信{tn:+d}千股"
+        pnl_lines.append(line)
+
+    portfolio_block = "\n".join(pnl_lines)
+
+    news_items: list[str] = []
+    try:
+        raw_news = (
+            (state.get("snapshot") or {})
+            .get("tools", {})
+            .get("get_financial_news", {})
+            .get("data", {})
+            .get("news", [])
+        )
+        for h in enriched:
+            sid  = h["stock_id"]
+            name = get_stock_name(sid) or ""
+            hits = [n["title"] for n in raw_news
+                    if sid in n["title"] or (name and name in n["title"])][:2]
+            if hits:
+                news_items.append(f"[{sid}] " + "；".join(hits))
+    except Exception:
+        pass
+
+    news_block = ("\n\n個股相關新聞：\n" + "\n".join(news_items)) if news_items else ""
+
     user_content = (
         f"今日市場展望：\n{state['final_brief']}\n\n"
-        f"使用者持倉損益：\n{portfolio_block}"
+        f"使用者持倉損益：\n{portfolio_block[:_CTX_LIMIT_PORTFOLIO_CHARS]}"
+        f"{news_block}"
     )
 
     start = time.monotonic()
