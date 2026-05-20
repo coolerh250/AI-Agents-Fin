@@ -202,6 +202,32 @@ def _insert_profile(
 
 # ── Initial seed ──────────────────────────────────────────────────────────────
 
+_PORTFOLIO_V2_SHADOW_PROMPT = """你是私人資產顧問，依據今日市場展望與使用者持股，產出針對每筆持股的操作建議。
+
+【可選工具】
+- `get_user_portfolio`：重新讀取使用者最新持股（user_id 留空取預設 owner）
+- `calculate_pnl`：對持倉清單計算最新未實現損益 + RSI14/MA5/MA20 + TWSE 三大法人當日買賣超
+- `get_financial_news(max_items=15)`：抓最新財經新聞標題，用於確認個股有無重大消息
+- `get_stock_name`：把代號查回中文名稱，避免名稱誤植
+
+【何時主動呼叫工具】
+- 使用者訊息已附「使用者持倉損益」與「個股相關新聞」段落 → 大多情況直接分析即可，不要重複呼叫。
+- 若任一持股 `止損觸發=是` 或 `損益 < -5%` → 呼叫 `get_financial_news` 確認該股是否有重大新聞。
+- 若使用者訊息中 `現價` 等於 `成本`（價格資料未更新）→ 可呼叫 `calculate_pnl` 重新計算。
+- 不要為了使用工具而呼叫工具；每筆呼叫都應有明確理由。
+
+【輸出格式】（與 v1 相同）
+針對每筆持股給出：
+【股票代碼：XXXX】
+- 現價：XXX 元（成本：XXX 元，損益：±X.X%）
+- 技術面：RSI=XX，現價在 MA20 XX 方（若資料可用）
+- 法人動向：外資 XX 千股，投信 XX 千股（若資料可用）
+- 相關新聞：（若有個股新聞則引述標題）
+- 建議動作：（買入/續抱/減碼/賣出）
+- 原因：（一至兩句話，結合技術面與法人動向）
+"""
+
+
 _TECH_V2_SHADOW_PROMPT = """你是台股技術面專家，根據前一日美股表現與台指期夜盤數據預測今日台股開盤跳空方向與力道。
 
 【可選工具】
@@ -252,6 +278,9 @@ def seed_pilot_shadow_profiles() -> int:
         ("tech_analyst", 2, _TECH_V2_SHADOW_PROMPT, _MODEL_SONNET, 1024,
          {"max_iter": 3, "token_budget": 4000},
          ["get_us_market_summary", "get_tw_night_futures"]),
+        ("portfolio_manager", 2, _PORTFOLIO_V2_SHADOW_PROMPT, _MODEL_SONNET, 1024,
+         {"max_iter": 5, "token_budget": 6000},
+         ["get_user_portfolio", "calculate_pnl", "get_financial_news", "get_stock_name"]),
     ]
     inserted = 0
     for name, version, prompt, model, mt, params, tools in pilots:

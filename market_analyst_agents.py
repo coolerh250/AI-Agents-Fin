@@ -477,30 +477,30 @@ def chief_strategist_node(state: WorkflowState) -> dict:
 
 # ── Node: PortfolioManager (Sonnet) ──────────────────────────────────────────
 
-def portfolio_manager_node(state: WorkflowState) -> dict:
-    run_id = state.get("run_id")
-    logger.info("[PortfolioManager] 載入持倉並計算損益")
+def _build_portfolio_user_msg(state: WorkflowState) -> tuple[str, list[dict]]:
+    """Build the portfolio_manager user_content and return (msg, enriched_holdings).
+    Returns ('', []) if user has no holdings — caller should short-circuit."""
+    from telemetry import emit_event
     from portfolio_tools import get_user_portfolio, calculate_pnl
+    from database_tools import get_stock_name
+    run_id = state.get("run_id")
 
     holdings = get_user_portfolio(user_id=_OWNER_LINE_ID, _caller="portfolio_manager")
     if not holdings:
-        logger.info("[PortfolioManager] 無持倉資料，略過分析")
-        return {"portfolio_advice": ""}
+        return "", []
 
-    # Phase 4: emit price_stale event if yfinance fails for any holding
     try:
-        from telemetry import emit_event
         enriched = calculate_pnl(holdings, _caller="portfolio_manager")
         stale = [h["stock_id"] for h in enriched
-                 if h.get("current_price") is None or h.get("current_price") == h.get("entry_price")]
+                 if h.get("current_price") is None
+                 or h.get("current_price") == h.get("entry_price")]
         if stale:
             logger.warning(f"[PortfolioManager] 現價可能為舊資料：{stale}")
             emit_event(run_id, "fallback_activated", "portfolio_manager",
                        {"reason": "price_stale", "stocks": stale}, severity="warn")
     except Exception:
-        enriched = holdings  # bare fallback if calculate_pnl itself raises
+        enriched = holdings
 
-    from database_tools import get_stock_name
     pnl_lines = []
     for h in enriched:
         line = (
@@ -523,11 +523,8 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     news_items: list[str] = []
     try:
         raw_news = (
-            (state.get("snapshot") or {})
-            .get("tools", {})
-            .get("get_financial_news", {})
-            .get("data", {})
-            .get("news", [])
+            (state.get("snapshot") or {}).get("tools", {})
+            .get("get_financial_news", {}).get("data", {}).get("news", [])
         )
         for h in enriched:
             sid  = h["stock_id"]
@@ -538,7 +535,6 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
                 news_items.append(f"[{sid}] " + "；".join(hits))
     except Exception:
         pass
-
     news_block = ("\n\n個股相關新聞：\n" + "\n".join(news_items)) if news_items else ""
 
     user_content = (
@@ -546,7 +542,13 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
         f"使用者持倉損益：\n{portfolio_block[:_CTX_LIMIT_PORTFOLIO_CHARS]}"
         f"{news_block}"
     )
+    return user_content, enriched
 
+
+def _portfolio_primary(state: WorkflowState,
+                       user_content: str) -> tuple[str, int, float]:
+    """Original portfolio_manager LLM body. Returns (advice_text, latency_ms, cost_usd)."""
+    run_id = state.get("run_id")
     start = time.monotonic()
     response = _llm(_MODEL_SONNET, max_tokens=1024).invoke([
         SystemMessage(content=_PORTFOLIO_SYSTEM),
@@ -556,9 +558,85 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     _record_usage("portfolio_manager", _MODEL_SONNET, response, latency_ms,
                   run_id=run_id, system_prompt=_PORTFOLIO_SYSTEM, user_content=user_content)
 
-    result = _extract_text(response)
+    usage = getattr(response, "usage_metadata", None) or {}
+    in_tok  = int(usage.get("input_tokens",  0) or 0)
+    out_tok = int(usage.get("output_tokens", 0) or 0)
+    p = _PRICING.get(_MODEL_SONNET, {"input": 0.0, "output": 0.0})
+    cost_usd = (in_tok * p["input"] + out_tok * p["output"]) / 1_000_000
+    return _extract_text(response), latency_ms, cost_usd
+
+
+def _run_portfolio_shadow(state: WorkflowState, user_content: str,
+                          primary_text: str, primary_latency_ms: int,
+                          primary_cost_usd: float) -> None:
+    """Run shadow agent + persist comparison. Never raises."""
+    from telemetry import emit_event
+    run_id = state.get("run_id") or ""
+    try:
+        from strategy_profile import load_shadow_profile
+        from agent_runtime import run_agent_loop
+        from shadow_compare import compute_divergence, save_shadow_run
+
+        profile = load_shadow_profile("portfolio_manager")
+        if not profile:
+            logger.debug("[portfolio_manager.shadow] no v2 shadow profile — skipping")
+            return
+
+        shadow = run_agent_loop(
+            agent_name="portfolio_manager",
+            run_id=run_id,
+            profile=profile,
+            user_message=user_content,
+        )
+        div = compute_divergence(
+            primary_text, shadow.get("final_text", ""), output_kind="text",
+        )
+        save_shadow_run(
+            run_id=run_id,
+            agent_name="portfolio_manager",
+            primary_version=1,
+            shadow_version=profile.version,
+            primary_output=primary_text,
+            shadow_output=shadow.get("final_text", ""),
+            divergence=div,
+            shadow_meta=shadow,
+            primary_latency_ms=primary_latency_ms,
+            primary_cost_usd=primary_cost_usd,
+            shadow_cost_usd=shadow.get("cost_usd"),
+            shadow_error=shadow.get("error"),
+        )
+        logger.info(f"[portfolio_manager.shadow] divergence={div['score']} "
+                    f"iter={shadow.get('iterations')} "
+                    f"cost=${shadow.get('cost_usd', 0):.4f} "
+                    f"stop={shadow.get('stopped_reason')}")
+    except Exception as exc:
+        logger.warning(f"[portfolio_manager.shadow] failed (suppressed): {exc}")
+        emit_event(run_id, "shadow_failure", "portfolio_manager",
+                   {"error": str(exc)[:200]}, severity="warn")
+
+
+def portfolio_manager_node(state: WorkflowState) -> dict:
+    """LangGraph node entry. Production output is always the primary path —
+    shadow runs only when SHADOW_AGENTS env contains 'portfolio_manager',
+    and never affects state."""
+    logger.info("[PortfolioManager] 載入持倉並計算損益")
+
+    user_content, enriched = _build_portfolio_user_msg(state)
+    if not enriched:
+        logger.info("[PortfolioManager] 無持倉資料，略過分析")
+        return {"portfolio_advice": ""}
+
+    primary_text, primary_latency, primary_cost = _portfolio_primary(
+        state, user_content
+    )
     logger.success("[PortfolioManager] 持股診斷完成")
-    return {"portfolio_advice": result}
+
+    from agent_runtime import is_shadow_enabled
+    if is_shadow_enabled("portfolio_manager"):
+        _run_portfolio_shadow(state, user_content, primary_text,
+                              primary_latency, primary_cost)
+
+    return {"portfolio_advice": primary_text}
 
 
 def generate_portfolio_analysis_for_user(
