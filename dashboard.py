@@ -30,6 +30,8 @@ from database_tools import (
     get_recent_events,
     get_recent_lessons,
     get_recent_llm_traces,
+    get_recent_shadow_runs,
+    get_shadow_summary_per_agent,
     get_workflow_runs,
     save_actual,
     update_portfolio_item,
@@ -135,7 +137,7 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 (tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events,
- tab_eval, tab_flywheel, tab_audit) = st.tabs([
+ tab_eval, tab_flywheel, tab_audit, tab_shadow) = st.tabs([
     "📊 預測準確度",
     "💰 API 成本分析",
     "💼 個人持倉管理",
@@ -144,6 +146,7 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
     "📝 評估",
     "🔄 Flywheel",
     "🔍 稽核 / Trace",
+    "👥 Shadow 比對",
 ])
 
 
@@ -731,3 +734,65 @@ with tab_audit:
             for r in trace_rows
         ])
         st.dataframe(trace_df, use_container_width=True, hide_index=True)
+
+
+# ── Tab 9: Shadow 比對 (Phase 1) ───────────────────────────────────────────────
+
+with tab_shadow:
+    st.subheader("Shadow 比對概覽")
+    st.caption("Phase 1 多 agent 轉型：每個啟用 shadow 的 agent 會在每次 workflow 跑時同時跑「新版（含 tool-use 迴圈）」"
+               "與舊版，這裡呈現兩者輸出的差異趨勢。production 永遠送舊版，新版資料只供事後比對。")
+
+    shadow_days = st.slider("資料天數", 1, 60, 14, key="shadow_days")
+    summary = get_shadow_summary_per_agent(days=shadow_days)
+    if not summary:
+        st.info("尚無 shadow runs — 請設定 .env 的 `SHADOW_AGENTS=tech_analyst,portfolio_manager` 並等下一次 workflow 執行。")
+    else:
+        sum_df = pd.DataFrame([
+            {
+                "agent":           r["agent_name"],
+                "runs":            int(r["runs"] or 0),
+                "avg divergence":  round(float(r["avg_divergence"] or 0), 3),
+                "avg primary $":   round(float(r["avg_primary_cost"] or 0), 4),
+                "avg shadow $":    round(float(r["avg_shadow_cost"] or 0), 4),
+                "shadow errors":   int(r["shadow_errors"] or 0),
+            }
+            for r in summary
+        ])
+        st.dataframe(sum_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Divergence 趨勢")
+    agent_filter = st.selectbox(
+        "Agent", ["(全部)"] + [r["agent_name"] for r in summary] if summary
+                else ["(全部)"],
+        key="shadow_agent_filter",
+    )
+    arg = None if agent_filter == "(全部)" else agent_filter
+    runs = get_recent_shadow_runs(agent_name=arg, days=shadow_days, limit=200)
+    if not runs:
+        st.info("無資料。")
+    else:
+        run_df = pd.DataFrame([
+            {
+                "time":       str(r["created_at"]),
+                "agent":      r["agent_name"],
+                "shadow ver": r["shadow_version"],
+                "divergence": float(r["divergence_score"] or 0),
+                "kind":       r["divergence_kind"] or "—",
+                "primary $":  float(r["primary_cost_usd"] or 0),
+                "shadow $":   float(r["shadow_cost_usd"] or 0),
+                "error":      (r["shadow_error"] or "")[:60],
+                "run_id":     (r["run_id"] or "")[:8],
+            }
+            for r in runs
+        ])
+        # Plot per-agent divergence over time
+        try:
+            plot_df = run_df.sort_values("time")[["time", "agent", "divergence"]]
+            pivot = plot_df.pivot_table(index="time", columns="agent",
+                                        values="divergence", aggfunc="mean")
+            st.line_chart(pivot)
+        except Exception:
+            pass
+        st.dataframe(run_df, use_container_width=True, hide_index=True)

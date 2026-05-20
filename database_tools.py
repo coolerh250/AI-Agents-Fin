@@ -1011,6 +1011,67 @@ def get_recent_sessions_context(days: int = 10, limit: int = 8) -> str:
 
 # ── Dashboard helpers: recent audit + llm trace listings ──────────────────────
 
+def get_recent_shadow_runs(
+    agent_name: Optional[str] = None,
+    days: int = 14,
+    limit: int = 50,
+) -> list[dict]:
+    """Recent rows from shadow_runs, optionally filtered by agent_name."""
+    try:
+        params: dict = {"days": days, "lim": limit}
+        where = "WHERE created_at >= NOW() - INTERVAL :days DAY"
+        if agent_name:
+            where += " AND agent_name = :a"
+            params["a"] = agent_name
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text(f"""
+                    SELECT id, run_id, agent_name,
+                           primary_version, shadow_version,
+                           divergence_score, divergence_kind,
+                           primary_cost_usd, shadow_cost_usd,
+                           shadow_latency_ms, shadow_error, created_at
+                    FROM shadow_runs
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT :lim
+                """),
+                params,
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.debug(f"[dashboard] get_recent_shadow_runs failed: {exc}")
+        return []
+
+
+def get_shadow_summary_per_agent(days: int = 14) -> list[dict]:
+    """Per-agent aggregates of recent shadow_runs (count, avg divergence,
+    avg shadow cost, error rate). Used by the dashboard summary tab."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT
+                        agent_name,
+                        COUNT(*)                          AS runs,
+                        AVG(divergence_score)             AS avg_divergence,
+                        AVG(shadow_cost_usd)              AS avg_shadow_cost,
+                        AVG(primary_cost_usd)             AS avg_primary_cost,
+                        SUM(CASE WHEN shadow_error IS NOT NULL OR shadow_error <> ''
+                                 THEN 1 ELSE 0 END)       AS shadow_errors
+                    FROM shadow_runs
+                    WHERE created_at >= NOW() - INTERVAL :days DAY
+                    GROUP BY agent_name
+                    ORDER BY agent_name
+                """),
+                {"days": days},
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.debug(f"[dashboard] get_shadow_summary_per_agent failed: {exc}")
+        return []
+
+
 def get_recent_audit_log(days: int = 7, limit: int = 50) -> list[dict]:
     """Most recent rows from audit_log (portfolio CRUD, etc)."""
     try:
