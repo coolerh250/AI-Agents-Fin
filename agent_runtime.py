@@ -25,11 +25,14 @@ import time
 from typing import Optional
 
 import anthropic
+from dotenv import load_dotenv
 from loguru import logger
 
 from strategy_profile import StrategyProfile
 from telemetry import emit_event, record_usage
 from tool_catalog import execute, get_tools, to_anthropic_format
+
+load_dotenv()
 
 
 MAX_ITERATIONS_DEFAULT = 5
