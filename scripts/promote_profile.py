@@ -13,8 +13,15 @@ All mutations run in a transaction and write an entry to audit_log.
 """
 import argparse
 import json
+import os
 import sys
 from datetime import date, timedelta
+
+# Allow `python scripts/promote_profile.py` from either the repo root or
+# anywhere else by adding the repo root to sys.path.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from dotenv import load_dotenv
 from sqlalchemy import text
