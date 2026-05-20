@@ -17,9 +17,12 @@ _TWSE_T86_URL = (
 )
 
 
-def get_user_portfolio(user_id: Optional[str] = None) -> list[dict]:
+def get_user_portfolio(user_id: Optional[str] = None,
+                       _caller: Optional[str] = None) -> list[dict]:
     """Return holdings for a LINE user. user_id=None returns legacy NULL-user records."""
-    return get_portfolio(user_id=user_id)
+    from database_tools import validate_tool_permission
+    validate_tool_permission("get_user_portfolio", _caller)
+    return get_portfolio(user_id=user_id, _caller=_caller)
 
 
 def _calc_rsi(closes: pd.Series, period: int = 14) -> float:
@@ -78,11 +81,13 @@ def _fetch_institution_flows(stock_ids: list[str]) -> dict[str, dict]:
         return {}
 
 
-def calculate_pnl(holdings: list[dict]) -> list[dict]:
+def calculate_pnl(holdings: list[dict], _caller: Optional[str] = None) -> list[dict]:
     """
     Enrich each holding with live P&L, technical indicators, and institution flows.
     Falls back gracefully when any data source is unavailable.
     """
+    from database_tools import validate_tool_permission
+    validate_tool_permission("calculate_pnl", _caller)
     stock_ids  = [h["stock_id"] for h in holdings]
     inst_flows = _fetch_institution_flows(stock_ids)
     enriched   = []

@@ -287,8 +287,9 @@ def ensure_portfolio_table() -> None:
                 pass  # Already applied — expected on subsequent runs
 
 
-def get_portfolio(user_id: Optional[str] = None) -> list[dict]:
+def get_portfolio(user_id: Optional[str] = None, _caller: Optional[str] = None) -> list[dict]:
     """Return holdings for a user. user_id=None returns legacy NULL-user records."""
+    validate_tool_permission("get_portfolio", _caller)
     with _engine().connect() as conn:
         rows = conn.execute(
             text("""
@@ -876,6 +877,15 @@ _TOOL_PERMISSION_RULES: dict[str, list[str]] = {
                             "daily_run", "backtest_agent"],
     "send_telegram":       ["send_notification", "alert_runner", "investment_workflow",
                             "daily_run", "backtest_agent"],
+    # Phase 1 — tool catalog readers (agent_loop is the synthetic caller used
+    # by ReAct loops; portfolio_manager / tech_analyst are also allowed for
+    # direct calls outside the loop):
+    "get_portfolio":       ["dashboard", "portfolio_manager", "agent_loop",
+                            "investment_workflow"],
+    "get_user_portfolio":  ["portfolio_manager", "agent_loop", "investment_workflow",
+                            "daily_run"],
+    "calculate_pnl":       ["portfolio_manager", "dashboard", "agent_loop",
+                            "daily_run"],
 }
 
 
