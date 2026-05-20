@@ -48,11 +48,11 @@ def _send(alert_id: str, severity: str, msg: str) -> None:
 
     from messenger_tools import send_line, send_telegram
     if severity == "critical":
-        send_line(msg)
-        send_telegram(msg)
+        send_line(msg, _caller="alert_runner")
+        send_telegram(msg, _caller="alert_runner")
     else:
-        if send_telegram(msg).get("status") != "ok":
-            send_line(msg)  # fallback when Telegram unconfigured/unavailable
+        if send_telegram(msg, _caller="alert_runner").get("status") != "ok":
+            send_line(msg, _caller="alert_runner")  # fallback when Telegram unconfigured
 
     record_alert_sent(alert_id, severity, msg)
     logger.warning(f"[{severity.upper()}] {alert_id}: {msg[:80]}")

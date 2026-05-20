@@ -21,6 +21,7 @@ _OWNER_LINE_ID: Optional[str] = os.getenv("LINE_USER_ID") or None
 
 # Phase 3: context size limits (chars) to guard against runaway input
 _CTX_LIMIT_CHIEF_HISTORY_CHARS  = 800   # max chars for injected SQL history
+_CTX_LIMIT_CHIEF_SESSIONS_CHARS = 600   # max chars for session_episodes context (B-3)
 _CTX_LIMIT_CHIEF_LESSONS_CHARS  = 600   # max chars for strategy lessons context
 _CTX_LIMIT_CHIEF_NEWS_CHARS     = 800   # max chars for financial news headlines
 _CTX_LIMIT_PORTFOLIO_CHARS      = 5000  # max chars for portfolio block (raised for tech indicators + institution flows)
@@ -339,6 +340,16 @@ def chief_strategist_node(state: WorkflowState) -> dict:
     except Exception as exc:
         logger.debug(f"[ChiefStrategist] 歷史上下文載入失敗（略過）: {exc}")
 
+    # B-3: inject recent session_episodes (regime + outcome) — episodic memory read-back
+    try:
+        from database_tools import get_recent_sessions_context
+        sessions = get_recent_sessions_context(days=10, limit=8)
+        if sessions:
+            sessions = sessions[:_CTX_LIMIT_CHIEF_SESSIONS_CHARS]
+            user_content += f"\n\n{sessions}"
+    except Exception as exc:
+        logger.debug(f"[ChiefStrategist] sessions context 載入失敗（略過）: {exc}")
+
     # Adaptive Flywheel Phase 1: inject regime-matched strategy lessons
     try:
         from lesson_retriever import get_lesson_context
@@ -599,7 +610,13 @@ def send_notification_node(state: WorkflowState) -> dict:
     except Exception as mcp_exc:
         logger.warning(f"[SendNotification] MCP call 失敗，改用直接呼叫: {mcp_exc}")
         from messenger_tools import send_line, send_telegram
-        results = {"line": send_line(report), "telegram": send_telegram(report)}
+        from telemetry import audited_direct_call
+        results = {
+            "line":     audited_direct_call("send_line", "send_notification", run_id,
+                                            send_line, report, _caller="send_notification"),
+            "telegram": audited_direct_call("send_telegram", "send_notification", run_id,
+                                            send_telegram, report, _caller="send_notification"),
+        }
         for channel, res in results.items():
             status = res.get("status")
             if status == "ok":
@@ -659,7 +676,12 @@ def save_to_db_node(state: WorkflowState) -> dict:
         except Exception as mcp_exc:
             logger.warning(f"[SaveToDB] MCP call 失敗，改用直接呼叫: {mcp_exc}")
             from database_tools import save_brief as _save_brief
-            row_id = _save_brief(trade_date, brief, gap_pct, gap_dir, line_report)
+            from telemetry import audited_direct_call
+            row_id = audited_direct_call(
+                "save_brief", "save_to_db", run_id,
+                _save_brief, trade_date, brief, gap_pct, gap_dir, line_report,
+                _caller="save_to_db",
+            )
 
         logger.success(f"[SaveToDB] 寫入成功 row_id={row_id}, date={trade_date}")
         emit_event(run_id, "node_success", "save_to_db",

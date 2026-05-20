@@ -5,6 +5,7 @@ LINE Notify was discontinued 2025-03-31; this module uses the Messaging API inst
 """
 import os
 import re
+from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -26,11 +27,13 @@ def format_brief(brief_text: str) -> str:
     return "📊 台股期貨今日建議書\n\n" + "\n\n".join(sections)
 
 
-def send_line(message: str) -> dict:
+def send_line(message: str, _caller: Optional[str] = None) -> dict:
     """Send via LINE Messaging API (Push Message).
     Requires LINE_CHANNEL_ACCESS_TOKEN and LINE_USER_ID in .env.
     Setup: https://developers.line.biz/ → Messaging API channel → Channel access token
     """
+    from database_tools import validate_tool_permission
+    validate_tool_permission("send_line", _caller)
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
     user_id = os.getenv("LINE_USER_ID", "")
     if not token or not user_id:
@@ -54,7 +57,9 @@ def send_line(message: str) -> dict:
         return {"status": "error", "channel": "line", "error": str(exc)}
 
 
-def send_telegram(message: str) -> dict:
+def send_telegram(message: str, _caller: Optional[str] = None) -> dict:
+    from database_tools import validate_tool_permission
+    validate_tool_permission("send_telegram", _caller)
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
@@ -72,11 +77,11 @@ def send_telegram(message: str) -> dict:
         return {"status": "error", "channel": "telegram", "error": str(exc)}
 
 
-def send_brief(brief_text: str) -> dict:
+def send_brief(brief_text: str, _caller: Optional[str] = None) -> dict:
     """Send the investment brief to all configured channels. Text is sent as-is."""
     return {
-        "line":     send_line(brief_text[:_LINE_MAX]),
-        "telegram": send_telegram(brief_text[:_TG_MAX]),
+        "line":     send_line(brief_text[:_LINE_MAX], _caller=_caller),
+        "telegram": send_telegram(brief_text[:_TG_MAX], _caller=_caller),
     }
 
 

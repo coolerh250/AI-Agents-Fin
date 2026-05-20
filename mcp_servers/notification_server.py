@@ -81,8 +81,8 @@ def push_investment_brief(brief_text: str, api_key: str = "") -> dict:
         message = brief_text[:4000]
 
         with audit_tool("notification", "push_investment_brief"):
-            line_result = send_line(message)
-            tg_result   = send_telegram(message)
+            line_result = send_line(message, _caller="send_notification")
+            tg_result   = send_telegram(message, _caller="send_notification")
 
         logger.success("[notification] Brief pushed successfully")
         return {"line": line_result, "telegram": tg_result, "dedup_skipped": False}
@@ -107,7 +107,8 @@ def push_raw(channel: str, message: str, api_key: str = "") -> dict:
     try:
         with audit_tool("notification", "push_raw"):
             from messenger_tools import send_line, send_telegram
-            result = send_line(msg) if channel == "line" else send_telegram(msg)
+            result = (send_line(msg, _caller="send_notification") if channel == "line"
+                      else send_telegram(msg, _caller="send_notification"))
         logger.success(f"[push_raw] Sent to {channel}")
         return result
     except Exception as exc:

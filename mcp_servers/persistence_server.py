@@ -60,7 +60,8 @@ def save_brief(
         with audit_tool("persistence", "save_brief"):
             from database_tools import save_brief as _save_brief
             d = _date.fromisoformat(trade_date)
-            row_id = _save_brief(d, brief_text, predicted_gap_pct, gap_direction, line_report)
+            row_id = _save_brief(d, brief_text, predicted_gap_pct, gap_direction,
+                                 line_report, _caller="save_to_db")
             logger.success(f"[save_brief] row_id={row_id} trade_date={trade_date}")
             return {"success": True, "row_id": row_id, "error": None}
     except Exception as exc:

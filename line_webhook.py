@@ -119,6 +119,7 @@ def _handle_add(user_id: str, stock_id: str, qty: int, entry: float) -> str:
         entry_price=entry,
         quantity=qty,
         user_id=user_id,
+        _caller="line_webhook",
     )
     if ok:
         return f"✅ 已新增 {stock_id}，{qty} 股，成本 {entry} 元"

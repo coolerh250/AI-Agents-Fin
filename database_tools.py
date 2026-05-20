@@ -41,8 +41,10 @@ def save_brief(
     predicted_gap_pct: Optional[float],
     gap_direction: Optional[str],
     line_report: Optional[str] = None,
+    _caller: Optional[str] = None,
 ) -> int:
     """Upsert daily brief (one per trade_date). Returns the row id."""
+    validate_tool_permission("save_brief", _caller)
     with _engine().begin() as conn:
         result = conn.execute(
             text("""
@@ -306,8 +308,10 @@ def add_portfolio_item(
     stop_loss_level: float = 5.0,
     strategy_type: str = "波段",
     user_id: Optional[str] = None,
+    _caller: Optional[str] = None,
 ) -> bool:
     """Insert a new holding. Returns False if (line_user_id, stock_id) already exists."""
+    validate_tool_permission("add_portfolio_item", _caller)
     try:
         with _engine().begin() as conn:
             conn.execute(
@@ -324,7 +328,12 @@ def add_portfolio_item(
         return False
 
 
-def delete_portfolio_item(item_id: int, user_id: Optional[str] = None) -> None:
+def delete_portfolio_item(
+    item_id: int,
+    user_id: Optional[str] = None,
+    _caller: Optional[str] = None,
+) -> None:
+    validate_tool_permission("delete_portfolio_item", _caller)
     with _engine().begin() as conn:
         before_row = conn.execute(
             text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
@@ -362,7 +371,9 @@ def update_portfolio_item(
     strategy_type: str,
     entry_price: Optional[float] = None,
     user_id: Optional[str] = None,
+    _caller: Optional[str] = None,
 ) -> None:
+    validate_tool_permission("update_portfolio_item", _caller)
     with _engine().begin() as conn:
         before_row = conn.execute(
             text("SELECT * FROM user_portfolio WHERE id = :id"), {"id": item_id}
@@ -852,26 +863,44 @@ def log_tool_call(
         logger.warning(f"[telemetry] log_tool_call failed: {exc}")
 
 
-# Callers allowed per high-risk tool. Fail-open: logs violation, never blocks.
+# Callers allowed per high-risk tool. Strict when caller is provided; transitional
+# when caller is None (logs warning but allows, so legacy call sites don't break).
 _TOOL_PERMISSION_RULES: dict[str, list[str]] = {
     "save_brief":          ["save_to_db"],
     "add_portfolio_item":  ["dashboard", "line_webhook"],
     "delete_portfolio_item": ["dashboard", "line_webhook"],
     "update_portfolio_item": ["dashboard", "line_webhook"],
-    "send_line":           ["send_notification", "alert_runner", "investment_workflow"],
-    "send_telegram":       ["send_notification", "alert_runner", "investment_workflow"],
+    "send_line":           ["send_notification", "alert_runner", "investment_workflow",
+                            "daily_run", "backtest_agent"],
+    "send_telegram":       ["send_notification", "alert_runner", "investment_workflow",
+                            "daily_run", "backtest_agent"],
 }
 
 
-def validate_tool_permission(tool_id: str, caller: str) -> bool:
-    """Return True if caller is allowed. Log violation but never block (fail-open)."""
+def validate_tool_permission(tool_id: str, caller: Optional[str]) -> None:
+    """
+    Verify the caller is allowed to invoke a guarded tool.
+
+    Raises PermissionError on violation (fail-closed) when caller is provided.
+    If caller is None, logs a warning and allows — this is the transition path
+    for call sites that have not yet been updated to pass their identity. New
+    code SHOULD always pass the caller name.
+    """
     allowed = _TOOL_PERMISSION_RULES.get(tool_id)
     if allowed is None:
-        return True
+        return
+    if caller is None:
+        logger.warning(f"[tool_permission] {tool_id!r} called without _caller identity — allowing (transition)")
+        return
     if caller in allowed:
-        return True
-    logger.warning(f"[tool_permission] {caller!r} called {tool_id!r} — not in allowed list {allowed}")
-    return False  # caller can decide whether to honour; production is fail-open
+        return
+    logger.error(f"[tool_permission] DENIED: {caller!r} not allowed to call {tool_id!r} (allowed: {allowed})")
+    try:
+        log_tool_call(tool_id=tool_id, tool_type="direct", caller=caller,
+                      status="denied", error_message="caller not in allowed list")
+    except Exception:
+        pass
+    raise PermissionError(f"{caller!r} is not authorized to call {tool_id!r}")
 
 
 # ── Phase 3: Context engineering helpers ──────────────────────────────────────
@@ -923,6 +952,103 @@ def get_recent_accuracy_context(days: int = 14) -> str:
             f"  {r[0]} {label} 預測 {r[1]}({pred_gap:+.1f}%) → 實際 {actual_gap:+.1f}%"
         )
     return "\n".join(lines)
+
+
+def get_recent_sessions_context(days: int = 10, limit: int = 8) -> str:
+    """
+    Compact regime + outcome history from session_episodes, formatted for
+    chief_strategist context injection. Only includes episodes with actuals
+    backfilled (otherwise the comparison is meaningless).
+    Returns "" if no episodes available.
+    """
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT trade_date, regime_sox, regime_foreign_oi, divergence_signal,
+                           predicted_direction, predicted_gap_pct,
+                           actual_direction, actual_gap_pct, direction_correct
+                    FROM session_episodes
+                    WHERE trade_date >= CURDATE() - INTERVAL :days DAY
+                      AND actual_gap_pct IS NOT NULL
+                    ORDER BY trade_date DESC
+                    LIMIT :lim
+                """),
+                {"days": days, "lim": limit},
+            ).fetchall()
+    except Exception as exc:
+        logger.debug(f"[context] get_recent_sessions_context failed: {exc}")
+        return ""
+    if not rows:
+        return ""
+    lines = [f"【近期 {len(rows)} 日場景記憶（regime + 預測 vs 實際）】"]
+    for r in rows:
+        sox = r[1] or "—"
+        foi = r[2] or "—"
+        div = "div" if r[3] else "—"
+        pd_ = r[4] or "?"
+        pg = float(r[5]) if r[5] is not None else 0.0
+        ad = r[6] or "?"
+        ag = float(r[7]) if r[7] is not None else 0.0
+        mark = "✓" if r[8] == 1 else ("✗" if r[8] == 0 else "?")
+        lines.append(
+            f"  {r[0]} [SOX:{sox}/外資:{foi}/{div}] {pd_}({pg:+.1f}%) → {ad}({ag:+.1f}%) {mark}"
+        )
+    return "\n".join(lines)
+
+
+# ── Dashboard helpers: recent audit + llm trace listings ──────────────────────
+
+def get_recent_audit_log(days: int = 7, limit: int = 50) -> list[dict]:
+    """Most recent rows from audit_log (portfolio CRUD, etc)."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT id, table_name, operation, record_id, actor,
+                           before_json, after_json, created_at
+                    FROM audit_log
+                    WHERE created_at >= NOW() - INTERVAL :days DAY
+                    ORDER BY created_at DESC
+                    LIMIT :lim
+                """),
+                {"days": days, "lim": limit},
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.debug(f"[dashboard] get_recent_audit_log failed: {exc}")
+        return []
+
+
+def get_recent_llm_traces(
+    days: int = 7,
+    limit: int = 50,
+    finish_reason: Optional[str] = None,
+) -> list[dict]:
+    """Most recent llm_traces rows; optionally filter by finish_reason."""
+    try:
+        where = "WHERE created_at >= NOW() - INTERVAL :days DAY"
+        params: dict = {"days": days, "lim": limit}
+        if finish_reason:
+            where += " AND finish_reason = :fr"
+            params["fr"] = finish_reason
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text(f"""
+                    SELECT id, run_id, agent_name, model_name, finish_reason,
+                           input_tokens, output_tokens, thinking_tokens,
+                           latency_ms, created_at
+                    FROM llm_traces
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT :lim
+                """),
+                params,
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.debug(f"[dashboard] get_recent_llm_traces failed: {exc}")
+        return []
 
 
 # ── Phase 4: Session episodes ──────────────────────────────────────────────────

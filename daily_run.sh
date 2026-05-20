@@ -18,7 +18,7 @@ notify_line() {
   MSG="$1" uv run python -c '
 import os
 from messenger_tools import send_line
-send_line(os.environ["MSG"])
+send_line(os.environ["MSG"], _caller="daily_run")
 ' >/dev/null 2>&1 || true
 }
 

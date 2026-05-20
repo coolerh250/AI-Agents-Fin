@@ -204,8 +204,8 @@ def _run_post_alerts(run_id: str, result: dict, run_cost: float,
     # CRITICAL alerts → LINE + Telegram; WARNING → Telegram only
     has_critical = any("[A-00" in a and "CRITICAL" in a for a in alerts)
     if has_critical:
-        send_line(message)
-    send_telegram(message)
+        send_line(message, _caller="investment_workflow")
+    send_telegram(message, _caller="investment_workflow")
     logger.warning(f"[Alerts] {len(alerts)} 條警告已推送")
 
 
@@ -265,7 +265,8 @@ def main():
         log_event(run_id, "node_failure", "main",
                   {"reason": "snapshot_hmac_mismatch"}, severity="error")
         from messenger_tools import send_line
-        send_line("🚨 [Security] market_snapshot.json HMAC mismatch — workflow aborted")
+        send_line("🚨 [Security] market_snapshot.json HMAC mismatch — workflow aborted",
+                  _caller="investment_workflow")
         sys.exit(1)
 
     # Snapshot freshness check
@@ -281,8 +282,8 @@ def main():
         from messenger_tools import send_line, send_telegram
         msg = (f"🚨 [A-001+A-005] 市場快照過舊（{snapshot_age_seconds//3600:.0f}h），"
                f"工作流已中止。請手動執行 test_collection.py")
-        send_line(msg)
-        send_telegram(msg)
+        send_line(msg, _caller="investment_workflow")
+        send_telegram(msg, _caller="investment_workflow")
         sys.exit(1)
 
     if snap_age > timedelta(hours=_SNAPSHOT_WARN_HOURS):
@@ -293,7 +294,8 @@ def main():
         from messenger_tools import send_telegram
         send_telegram(
             f"⚠️ [A-005] 市場快照已 {snapshot_age_seconds//3600:.1f}h 未更新\n"
-            f"分析可能基於舊數據，請確認 test_collection.py 是否正常執行"
+            f"分析可能基於舊數據，請確認 test_collection.py 是否正常執行",
+            _caller="investment_workflow",
         )
 
     logger.info(f"Snapshot loaded: {snapshot['timestamp']} (age {snapshot_age_seconds}s)")

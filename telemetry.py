@@ -111,3 +111,43 @@ def timed_invoke(llm, messages: list) -> tuple:
     start = time.monotonic()
     response = llm.invoke(messages)
     return response, int((time.monotonic() - start) * 1000)
+
+
+def audited_direct_call(
+    tool_id: str,
+    caller: str,
+    run_id: Optional[str],
+    fn,
+    *args,
+    **kwargs,
+):
+    """
+    Invoke fn(*args, **kwargs) while logging the call to tool_audit_log with
+    tool_type='fallback'. Used when MCP failed and the workflow has to call the
+    underlying function directly — without this, the fallback path bypasses the
+    governance trail entirely (D-7 finding).
+    """
+    try:
+        from database_tools import log_tool_call
+    except Exception:
+        log_tool_call = None  # fail-silent in unusual import cycles
+
+    start = time.monotonic()
+    try:
+        result = fn(*args, **kwargs)
+        if log_tool_call:
+            log_tool_call(
+                tool_id=tool_id, tool_type="fallback", caller=caller,
+                run_id=run_id, status="ok",
+                latency_ms=int((time.monotonic() - start) * 1000),
+            )
+        return result
+    except Exception as exc:
+        if log_tool_call:
+            log_tool_call(
+                tool_id=tool_id, tool_type="fallback", caller=caller,
+                run_id=run_id, status="error",
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error_message=str(exc)[:500],
+            )
+        raise

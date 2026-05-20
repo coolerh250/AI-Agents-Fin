@@ -26,8 +26,10 @@ from database_tools import (
     get_per_run_cost_summary,
     get_portfolio,
     get_recent_accuracy,
+    get_recent_audit_log,
     get_recent_events,
     get_recent_lessons,
+    get_recent_llm_traces,
     get_workflow_runs,
     save_actual,
     update_portfolio_item,
@@ -37,42 +39,22 @@ st.set_page_config(page_title="量化工作室看板", layout="wide")
 
 
 def _require_auth() -> None:
-    """LINE OTP login (primary) with DASH_PASSWORD admin fallback."""
+    """LINE OTP is now the sole login path (DASH_PASSWORD removed)."""
     if st.session_state.get("authenticated"):
         return
 
     st.title("🔐 登入")
-    tab_line, tab_admin = st.tabs(["📱 LINE 登入", "🔧 管理員"])
-
-    with tab_line:
-        st.info("請先在 LINE Bot 傳送「**登入代碼**」，再將收到的 8 位代碼輸入於此")
-        code = st.text_input("登入代碼", max_chars=8, placeholder="AB12CD34")
-        if st.button("登入", key="line_login"):
-            from database_tools import consume_login_token
-            uid = consume_login_token(code.strip().upper())
-            if uid:
-                st.session_state.authenticated = True
-                st.session_state.line_user_id = uid
-                st.session_state.auth_method = "line"
-                st.rerun()
-            else:
-                st.error("代碼無效、已過期或已使用")
-
-    with tab_admin:
-        dash_pass = os.getenv("DASH_PASSWORD", "")
-        if dash_pass:
-            pwd = st.text_input("密碼", type="password", key="admin_pwd")
-            if st.button("登入", key="admin_login"):
-                if pwd == dash_pass:
-                    st.session_state.authenticated = True
-                    st.session_state.line_user_id = os.getenv("LINE_USER_ID") or None
-                    st.session_state.auth_method = "password"
-                    st.rerun()
-                else:
-                    st.error("密碼錯誤")
+    st.info("請先在 LINE Bot 傳送「**登入代碼**」，再將收到的 8 位代碼輸入於此")
+    code = st.text_input("登入代碼", max_chars=8, placeholder="AB12CD34")
+    if st.button("登入"):
+        from database_tools import consume_login_token
+        uid = consume_login_token(code.strip().upper())
+        if uid:
+            st.session_state.authenticated = True
+            st.session_state.line_user_id = uid
+            st.rerun()
         else:
-            st.info("未設定管理員密碼（DASH_PASSWORD）")
-
+            st.error("代碼無效、已過期或已使用")
     st.stop()
 
 
@@ -81,12 +63,10 @@ st.title("📈 台股期貨量化工作室")
 
 # ── Sidebar: logged-in user + logout ─────────────────────────────────────────
 with st.sidebar:
-    _auth_method = st.session_state.get("auth_method", "")
     _sid = st.session_state.get("line_user_id") or ""
-    _label = "管理員" if _auth_method == "password" else (f"LINE: {_sid[:15]}..." if _sid else "未知")
-    st.caption(f"已登入：{_label}")
+    st.caption(f"已登入：LINE: {_sid[:15]}...")
     if st.button("登出"):
-        for _k in ("authenticated", "line_user_id", "auth_method"):
+        for _k in ("authenticated", "line_user_id"):
             st.session_state.pop(_k, None)
         st.rerun()
 
@@ -154,7 +134,8 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events, tab_eval, tab_flywheel = st.tabs([
+(tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events,
+ tab_eval, tab_flywheel, tab_audit) = st.tabs([
     "📊 預測準確度",
     "💰 API 成本分析",
     "💼 個人持倉管理",
@@ -162,6 +143,7 @@ tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events, tab_eval, tab_fly
     "📋 事件日誌",
     "📝 評估",
     "🔄 Flywheel",
+    "🔍 稽核 / Trace",
 ])
 
 
@@ -330,6 +312,7 @@ with tab_portfolio:
                     new_stock.strip().upper(),
                     new_entry, int(new_qty), new_sl, new_strat,
                     user_id=_current_uid,
+                    _caller="dashboard",
                 )
                 if ok:
                     st.success(f"已新增 {new_stock.strip().upper()}")
@@ -415,6 +398,7 @@ with tab_portfolio:
                         str(row["策略"]),
                         entry_price=float(row["成本(元)"]),
                         user_id=_current_uid,
+                        _caller="dashboard",
                     )
                 st.cache_data.clear()
                 st.success("已儲存所有變更")
@@ -428,7 +412,8 @@ with tab_portfolio:
                 }
                 selected = st.selectbox("選擇要刪除的持倉", list(options.keys()))
                 if st.button("確認刪除", type="primary"):
-                    delete_portfolio_item(options[selected], user_id=_current_uid)
+                    delete_portfolio_item(options[selected], user_id=_current_uid,
+                                          _caller="dashboard")
                     st.cache_data.clear()
                     st.success(f"已刪除：{selected}")
                     st.rerun()
@@ -690,3 +675,59 @@ with tab_flywheel:
         ]
         fw_df = pd.DataFrame(rows_display)
         st.dataframe(fw_df, use_container_width=True, hide_index=True)
+
+
+# ── Tab 8: Audit / LLM Trace ──────────────────────────────────────────────────
+
+with tab_audit:
+    st.subheader("最近 7 天稽核紀錄（portfolio CRUD / 變更）")
+    audit_days = st.slider("天數", 1, 30, 7, key="audit_days")
+    audit_rows = get_recent_audit_log(days=audit_days, limit=100)
+    if not audit_rows:
+        st.info("近期無稽核紀錄。")
+    else:
+        audit_df = pd.DataFrame([
+            {
+                "時間":  str(r["created_at"]),
+                "表":    r["table_name"],
+                "操作":  r["operation"],
+                "id":    r["record_id"],
+                "actor": r["actor"],
+                "before": (r.get("before_json") or "")[:80],
+                "after":  (r.get("after_json")  or "")[:80],
+            }
+            for r in audit_rows
+        ])
+        st.dataframe(audit_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("最近 LLM Trace（含 finish_reason、token 與耗時）")
+    col_fr, col_days = st.columns(2)
+    with col_fr:
+        finish_filter = st.selectbox(
+            "finish_reason 過濾",
+            ["(全部)", "end_turn", "max_tokens", "stop_sequence", "tool_use"],
+            key="trace_fr",
+        )
+    with col_days:
+        trace_days = st.slider("天數", 1, 30, 7, key="trace_days")
+    fr_arg = None if finish_filter == "(全部)" else finish_filter
+    trace_rows = get_recent_llm_traces(days=trace_days, limit=100, finish_reason=fr_arg)
+    if not trace_rows:
+        st.info("近期無 LLM Trace。")
+    else:
+        trace_df = pd.DataFrame([
+            {
+                "時間":      str(r["created_at"]),
+                "agent":     r["agent_name"],
+                "model":     r["model_name"].replace("claude-", "").replace("-20251001", ""),
+                "in_tok":    r["input_tokens"],
+                "out_tok":   r["output_tokens"],
+                "think_tok": r["thinking_tokens"],
+                "latency_ms": r["latency_ms"],
+                "finish":    r["finish_reason"] or "—",
+                "run_id":    (r["run_id"] or "")[:8],
+            }
+            for r in trace_rows
+        ])
+        st.dataframe(trace_df, use_container_width=True, hide_index=True)
