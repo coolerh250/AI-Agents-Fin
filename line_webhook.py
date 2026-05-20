@@ -96,10 +96,10 @@ def _reply(reply_token: str, text: str) -> None:
 # ── Command handlers ───────────────────────────────────────────────────────────
 
 def _handle_query(user_id: str) -> str:
-    holdings = get_portfolio(user_id=user_id)
+    holdings = get_portfolio(user_id=user_id, _caller="line_webhook")
     if not holdings:
         return "目前沒有持倉記錄。\n輸入「說明」查看新增指令。"
-    enriched = calculate_pnl(holdings)
+    enriched = calculate_pnl(holdings, _caller="line_webhook")
     lines = ["📊 持倉損益報告\n"]
     for h in enriched:
         pnl_sign = "+" if h["unrealized_pnl"] >= 0 else ""

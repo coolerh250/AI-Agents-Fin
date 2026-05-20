@@ -76,11 +76,11 @@ with st.sidebar:
 @st.cache_data(ttl=300)
 def _fetch_pnl(holdings_json: str) -> list[dict]:
     from portfolio_tools import calculate_pnl
-    return calculate_pnl(json.loads(holdings_json))
+    return calculate_pnl(json.loads(holdings_json), _caller="dashboard")
 
 
 def load_pnl(user_id) -> list[dict]:
-    holdings = get_portfolio(user_id)
+    holdings = get_portfolio(user_id, _caller="dashboard")
     if not holdings:
         return []
     return _fetch_pnl(json.dumps(holdings, default=str))

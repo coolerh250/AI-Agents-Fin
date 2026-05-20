@@ -398,7 +398,7 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     logger.info("[PortfolioManager] 載入持倉並計算損益")
     from portfolio_tools import get_user_portfolio, calculate_pnl
 
-    holdings = get_user_portfolio(user_id=_OWNER_LINE_ID)
+    holdings = get_user_portfolio(user_id=_OWNER_LINE_ID, _caller="portfolio_manager")
     if not holdings:
         logger.info("[PortfolioManager] 無持倉資料，略過分析")
         return {"portfolio_advice": ""}
@@ -406,7 +406,7 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
     # Phase 4: emit price_stale event if yfinance fails for any holding
     try:
         from telemetry import emit_event
-        enriched = calculate_pnl(holdings)
+        enriched = calculate_pnl(holdings, _caller="portfolio_manager")
         stale = [h["stock_id"] for h in enriched
                  if h.get("current_price") is None or h.get("current_price") == h.get("entry_price")]
         if stale:
@@ -488,13 +488,13 @@ def generate_portfolio_analysis_for_user(
     from portfolio_tools import get_user_portfolio, calculate_pnl
     from database_tools import get_stock_name
 
-    holdings = get_user_portfolio(user_id=user_id)
+    holdings = get_user_portfolio(user_id=user_id, _caller="daily_run")
     if not holdings:
         logger.info(f"[PortfolioAnalysis] {user_id[:12]}... 無持倉資料，略過")
         return ""
 
     try:
-        enriched = calculate_pnl(holdings)
+        enriched = calculate_pnl(holdings, _caller="daily_run")
     except Exception as exc:
         logger.warning(f"[PortfolioAnalysis] calculate_pnl 失敗: {exc}")
         enriched = holdings
