@@ -3,7 +3,6 @@ mcp_servers/market_data_server.py
 Market Data MCP Server — Taiwan Stock Futures Analysis Team
 Tools: get_tw_future_chips | get_us_indices | get_tsm_adr | get_us_market_summary | get_financial_news | get_tw_night_futures
 Env: public APIs only — no credentials required
-Replaces: finance_mcp_server.py (kept for one sprint as rollback target)
 """
 import asyncio
 import re
@@ -228,9 +227,8 @@ async def get_tsm_adr() -> dict:
 
 @mcp.tool()
 async def get_us_market_summary() -> dict:
-    """Compatibility shim: fetch DJIA, NDX, SOX, TSMC ADR as combined markets list.
-    Calls get_us_indices + get_tsm_adr internally. Remove after test_collection.py migration.
-    Returns same format as previous finance_mcp_server.get_us_market_summary."""
+    """Combined: fetch DJIA, NDX, SOX, TSMC ADR as a single markets list.
+    Calls get_us_indices + get_tsm_adr internally."""
     logger.info("Tool 'get_us_market_summary' (shim) invoked")
     try:
         idx_raw = await _aretry(_fetch_us_indices_raw)

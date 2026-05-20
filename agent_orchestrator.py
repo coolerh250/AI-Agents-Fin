@@ -58,7 +58,7 @@ class AgentState(TypedDict):
 # ── ACT node ──────────────────────────────────────────────────────────────────
 
 async def _fetch_mcp_stats() -> dict:
-    """Open stdio channel to system_inspector MCP server and call get_system_stats."""
+    """Open stdio channel to system_server MCP and call get_system_stats."""
     params = StdioServerParameters(
         command="uv",
         args=["run", "mcp_servers/system_server.py"],
@@ -73,7 +73,7 @@ async def _fetch_mcp_stats() -> dict:
 
 def act_node(state: AgentState) -> dict:
     """Fetch live system data via MCP stdio transport."""
-    logger.info("[ACT] Opening MCP channel → system_inspector.py")
+    logger.info("[ACT] Opening MCP channel → system_server.py")
     try:
         stats = asyncio.run(_fetch_mcp_stats())
         logger.success(

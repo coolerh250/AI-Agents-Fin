@@ -24,23 +24,26 @@ def sign_snapshot(data: dict) -> dict:
 
 def verify_snapshot(data: dict) -> bool:
     """
-    Verify snapshot signature. Returns True if:
-    - SNAPSHOT_HMAC_KEY is not configured (skip)
-    - Snapshot has no _hmac field (transition period — allow unsigned)
-    - Signature matches
+    Verify snapshot signature.
 
-    Logs a warning if signature is present but does not match.
-    Does not abort in any case (transition period).
+    Returns True when:
+      - SNAPSHOT_HMAC_KEY is not configured (signing disabled)
+      - Snapshot has no _hmac field (transition: warn but allow)
+      - Signature matches
+
+    Returns False when signature is present but does not match the recomputed
+    HMAC. The caller MUST abort on False (possible tampering or stale key).
     """
     if not _KEY:
         return True
     sig = data.get("_hmac")
     if sig is None:
-        logger.warning("Snapshot has no HMAC signature — running unverified")
+        logger.warning("Snapshot has no HMAC signature — running unverified (transition)")
         return True
     incoming = {k: v for k, v in data.items() if k != "_hmac"}
     canonical = json.dumps(incoming, sort_keys=True, ensure_ascii=False).encode()
     expected = _hmac.new(_KEY, canonical, hashlib.sha256).hexdigest()
     if not _hmac.compare_digest(sig, expected):
-        logger.warning("Snapshot HMAC mismatch — possible tampering or stale key")
+        logger.error("Snapshot HMAC mismatch — possible tampering or stale key")
+        return False
     return True

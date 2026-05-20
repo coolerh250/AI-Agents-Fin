@@ -1,7 +1,14 @@
 """
 investment_workflow.py
-Taiwan Stock Futures Analysis Team — Phase 4 + Observability
-Graph: data_collector → (chip_analyst ∥ tech_analyst) → chief_strategist → format_agent → save_to_db
+Taiwan Stock Futures Analysis Team — Investment Brief Pipeline
+
+8-node LangGraph DAG (linear, not multi-agent):
+    data_collector → (chip_analyst, tech_analyst) → chief_strategist
+                  → portfolio_manager → format_agent → save_to_db → send_notification
+
+State is checkpointed to checkpoints.db (SqliteSaver) when
+langgraph-checkpoint-sqlite is installed; falls back to in-memory MemorySaver
+otherwise. No --resume CLI is exposed; manual recovery requires code changes.
 """
 import json
 import os
@@ -253,7 +260,13 @@ def main():
 
     snapshot = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
     from snapshot_integrity import verify_snapshot
-    verify_snapshot(snapshot)
+    if not verify_snapshot(snapshot):
+        logger.error("Snapshot integrity verification failed — aborting")
+        log_event(run_id, "node_failure", "main",
+                  {"reason": "snapshot_hmac_mismatch"}, severity="error")
+        from messenger_tools import send_line
+        send_line("🚨 [Security] market_snapshot.json HMAC mismatch — workflow aborted")
+        sys.exit(1)
 
     # Snapshot freshness check
     snap_ts  = datetime.fromisoformat(snapshot["timestamp"].replace("Z", "+00:00"))

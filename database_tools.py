@@ -551,6 +551,7 @@ def ensure_observability_tables() -> None:
     ensure_strategy_lessons_table()     # Adaptive Flywheel Phase 1
     ensure_stock_info_table()           # Stock code → company name mapping
     ensure_login_tokens_table()         # LINE OTP login
+    ensure_alert_history_table()        # Alert dedup (24h)
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1667,6 +1668,58 @@ def consume_login_token(token: str) -> Optional[str]:
     except Exception as exc:
         logger.warning(f"[login_tokens] consume_login_token failed: {exc}")
         return None
+
+
+def ensure_alert_history_table() -> None:
+    """Create alert_history table for 24h alert dedup. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS alert_history (
+                    id        BIGINT       AUTO_INCREMENT PRIMARY KEY,
+                    alert_id  VARCHAR(20)  NOT NULL,
+                    severity  VARCHAR(10)  NOT NULL,
+                    message   TEXT         NULL,
+                    sent_at   TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_ah_alert_sent (alert_id, sent_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_alert_history_table failed: {exc}")
+
+
+def was_alert_sent_recently(alert_id: str, hours: int = 24) -> bool:
+    """Return True if an alert with this id was sent within the last `hours`."""
+    try:
+        with _engine().connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT 1 FROM alert_history
+                    WHERE alert_id = :a
+                      AND sent_at > NOW() - INTERVAL :h HOUR
+                    LIMIT 1
+                """),
+                {"a": alert_id, "h": hours},
+            ).fetchone()
+        return row is not None
+    except Exception as exc:
+        logger.debug(f"[alert] was_alert_sent_recently failed: {exc}")
+        return False
+
+
+def record_alert_sent(alert_id: str, severity: str, message: str = "") -> None:
+    """Persist an alert send event so future calls within the dedup window skip."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO alert_history (alert_id, severity, message)
+                    VALUES (:a, :s, :m)
+                """),
+                {"a": alert_id, "s": severity, "m": (message or "")[:500]},
+            )
+    except Exception as exc:
+        logger.warning(f"[alert] record_alert_sent failed: {exc}")
 
 
 def get_all_portfolio_users() -> list[str]:

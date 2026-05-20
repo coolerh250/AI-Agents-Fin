@@ -11,6 +11,25 @@ cd /home/itadmin/ai_agent_studio
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
+# ── Active failure / success notification (A-3) ──────────────────────────────
+# Send a LINE message immediately when any pipefail step fails, instead of
+# relying on next-morning alert_runner to notice "yesterday didn't run".
+notify_line() {
+  MSG="$1" uv run python -c '
+import os
+from messenger_tools import send_line
+send_line(os.environ["MSG"])
+' >/dev/null 2>&1 || true
+}
+
+on_error() {
+  local CODE=$?
+  local LINE=$1
+  local CMD=$2
+  notify_line "🚨 daily_run failed (exit ${CODE}) at line ${LINE}: ${CMD}"
+}
+trap 'on_error $LINENO "$BASH_COMMAND"' ERR
+
 echo "[$(ts)] ===== 台股期貨分析團隊 daily run ====="
 
 echo "[$(ts)] Step 1: 市場資料採集"
@@ -91,3 +110,4 @@ if n:
 PYEOF
 
 echo "[$(ts)] ===== daily run 完成 ====="
+notify_line "✅ daily_run completed in ${SECONDS}s"

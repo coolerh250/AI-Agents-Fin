@@ -337,7 +337,7 @@ agents:
 
   - id: maintenance_agent
     role: system_health_monitor
-    description: "Diagnoses Ubuntu server health via MCP system_inspector"
+    description: "Diagnoses Ubuntu server health via MCP system_server"
     status: active
     graph: maintenance_agent
     position: 2
@@ -348,7 +348,7 @@ agents:
       thinking: none
 
     tools:
-      reads:  [mcp.system_inspector.get_system_stats]
+      reads:  [mcp.system_server.get_system_stats]
       writes: [state.final_analysis]
     memory_access:
       reads:  []
@@ -361,7 +361,7 @@ agents:
       alert_on_exceed:   false
 
     permissions:
-      - call_mcp_system_inspector
+      - call_mcp_system_server
     approval_required: false
     supervisor: null
     reviewer: null
@@ -419,8 +419,8 @@ permission_groups:
     level: medium
     granted_to: [send_notification, alert_runner, investment_workflow]
 
-  call_mcp_system_inspector:
-    description: "Spawn system_inspector.py MCP subprocess"
+  call_mcp_system_server:
+    description: "Spawn system_server.py MCP subprocess"
     level: low
     granted_to: [maintenance_agent]
     env_whitelist: [PATH, HOME, LANG]
