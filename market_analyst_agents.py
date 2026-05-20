@@ -291,21 +291,28 @@ def chip_analyst_node(state: WorkflowState) -> dict:
 
 # ── Node: TechnicalAnalyst (Sonnet) ──────────────────────────────────────────
 
-def tech_analyst_node(state: WorkflowState) -> dict:
+def _build_tech_user_msg(state: WorkflowState) -> str:
+    """Build the user_content for the tech analyst — same for primary and shadow."""
     from telemetry import emit_event
     run_id = state.get("run_id")
-    logger.info("[TechnicalAnalyst] 開始技術面分析")
     raw = state.get("raw_market_data") or {}
-    us_keys = ("djia_chg_pct", "ndx_chg_pct", "sox_chg_pct", "tsm_adr_chg_pct", "night_futures_chg_pct")
+    us_keys = ("djia_chg_pct", "ndx_chg_pct", "sox_chg_pct",
+               "tsm_adr_chg_pct", "night_futures_chg_pct")
     us_data = {k: raw[k] for k in us_keys if k in raw and raw[k] is not None}
     if not us_data:
         us_data = state["snapshot"]["tools"]["get_us_market_summary"]["data"]["markets"]
         emit_event(run_id, "fallback_activated", "tech_analyst",
                    {"reason": "data_collector_empty",
                     "raw_bytes": len(json.dumps(us_data))}, severity="warn")
-        logger.warning(f"[TechnicalAnalyst] Fallback: raw snapshot {len(json.dumps(us_data))} bytes")
-    user_content = f"技術面數據：\n{json.dumps(us_data, ensure_ascii=False, indent=2)}"
+        logger.warning(f"[TechnicalAnalyst] Fallback: raw snapshot "
+                       f"{len(json.dumps(us_data))} bytes")
+    return f"技術面數據：\n{json.dumps(us_data, ensure_ascii=False, indent=2)}"
 
+
+def _tech_analyst_primary(state: WorkflowState,
+                          user_content: str) -> tuple[str, int, float]:
+    """Original tech_analyst logic. Returns (tech_report_text, latency_ms, cost_usd)."""
+    run_id = state.get("run_id")
     start = time.monotonic()
     response = _llm(_MODEL_SONNET).invoke([
         SystemMessage(content=_TECH_SYSTEM),
@@ -315,9 +322,86 @@ def tech_analyst_node(state: WorkflowState) -> dict:
     _record_usage("tech_analyst", _MODEL_SONNET, response, latency_ms,
                   run_id=run_id, system_prompt=_TECH_SYSTEM, user_content=user_content)
 
-    result = _extract_text(response)
-    logger.success(f"[TechnicalAnalyst] 完成：{result[:80]}...")
-    return {"tech_report": result}
+    usage = getattr(response, "usage_metadata", None) or {}
+    in_tok  = int(usage.get("input_tokens",  0) or 0)
+    out_tok = int(usage.get("output_tokens", 0) or 0)
+    p = _PRICING.get(_MODEL_SONNET, {"input": 0.0, "output": 0.0})
+    cost_usd = (in_tok * p["input"] + out_tok * p["output"]) / 1_000_000
+
+    return _extract_text(response), latency_ms, cost_usd
+
+
+def _run_tech_shadow(state: WorkflowState, user_content: str,
+                     primary_text: str, primary_latency_ms: int,
+                     primary_cost_usd: float) -> None:
+    """Run shadow agent + persist comparison. Never raises."""
+    from telemetry import emit_event
+    run_id = state.get("run_id") or ""
+    try:
+        from strategy_profile import load_shadow_profile
+        from agent_runtime import run_agent_loop
+        from shadow_compare import compute_divergence, save_shadow_run
+
+        profile = load_shadow_profile("tech_analyst")
+        if not profile:
+            logger.debug("[tech_analyst.shadow] no v2 shadow profile — skipping")
+            return
+
+        shadow = run_agent_loop(
+            agent_name="tech_analyst",
+            run_id=run_id,
+            profile=profile,
+            user_message=user_content,
+        )
+        div = compute_divergence(
+            primary_text, shadow.get("final_text", ""),
+            output_kind="json",
+            critical_fields=["gap_direction", "estimated_gap_pct"],
+            numeric_tolerance_pct=15.0,  # gap_pct is small magnitude, allow more slack
+        )
+        save_shadow_run(
+            run_id=run_id,
+            agent_name="tech_analyst",
+            primary_version=1,
+            shadow_version=profile.version,
+            primary_output=primary_text,
+            shadow_output=shadow.get("final_text", ""),
+            divergence=div,
+            shadow_meta=shadow,
+            primary_latency_ms=primary_latency_ms,
+            shadow_latency_ms=None,  # individual iterations logged via record_usage
+            primary_cost_usd=primary_cost_usd,
+            shadow_cost_usd=shadow.get("cost_usd"),
+            shadow_error=shadow.get("error"),
+        )
+        logger.info(f"[tech_analyst.shadow] divergence={div['score']} "
+                    f"iter={shadow.get('iterations')} "
+                    f"cost=${shadow.get('cost_usd', 0):.4f} "
+                    f"stop={shadow.get('stopped_reason')}")
+    except Exception as exc:
+        logger.warning(f"[tech_analyst.shadow] failed (suppressed): {exc}")
+        emit_event(run_id, "shadow_failure", "tech_analyst",
+                   {"error": str(exc)[:200]}, severity="warn")
+
+
+def tech_analyst_node(state: WorkflowState) -> dict:
+    """LangGraph node entry. Production output is always the primary path —
+    shadow runs only when SHADOW_AGENTS env contains 'tech_analyst', and
+    never affects state."""
+    logger.info("[TechnicalAnalyst] 開始技術面分析")
+    user_content = _build_tech_user_msg(state)
+    primary_text, primary_latency, primary_cost = _tech_analyst_primary(
+        state, user_content
+    )
+    logger.success(f"[TechnicalAnalyst] 完成：{primary_text[:80]}...")
+
+    # Phase 1 shadow mode (D-6 'agent_loop' caller, audited via tool_catalog)
+    from agent_runtime import is_shadow_enabled
+    if is_shadow_enabled("tech_analyst"):
+        _run_tech_shadow(state, user_content, primary_text,
+                         primary_latency, primary_cost)
+
+    return {"tech_report": primary_text}
 
 
 # ── Node: ChiefStrategist (Opus + Extended Thinking) ─────────────────────────

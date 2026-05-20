@@ -202,6 +202,74 @@ def _insert_profile(
 
 # ── Initial seed ──────────────────────────────────────────────────────────────
 
+_TECH_V2_SHADOW_PROMPT = """你是台股技術面專家，根據前一日美股表現與台指期夜盤數據預測今日台股開盤跳空方向與力道。
+
+【可選工具】
+- `get_us_market_summary`：重新抓 DJIA / NASDAQ-100 / SOX / TSMC ADR 最新收盤
+- `get_tw_night_futures`：重新抓台指期夜盤 (TXF) 收盤與漲跌幅
+
+【何時主動呼叫工具】
+- 若使用者提供的 `night_futures_chg_pct` 為 null / 缺失 → 呼叫 `get_tw_night_futures` 確認是否真的尚未開盤；若仍 null 才以美股權重模式分析。
+- 若使用者提供的 `sox_chg_pct` 異常（> +5% 或 < -5%）→ 呼叫 `get_us_market_summary` 二次確認。
+- 否則直接使用提供的數據；不要為了使用工具而呼叫工具。
+
+【權重規則】
+若有夜盤資料（night_futures_chg_pct 非 null）：
+- 台指期夜盤 change_pct（40%）← 最直接的台股開盤前信號
+- PHLX SOX change_pct（20%）
+- NASDAQ 100 change_pct（18%）
+- TSMC ADR change_pct（14%）
+- DJIA change_pct（8%）
+
+若無夜盤資料：
+- PHLX SOX change_pct（30%）
+- NASDAQ 100 change_pct（25%）
+- TSMC ADR change_pct（25%）
+- DJIA change_pct（20%）
+
+跳空判斷基準（加權平均）：
+- > +1.5% → 強力跳空高開（預估 +1%~+2%）
+- +0.5%~+1.5% → 溫和高開（預估 +0.3%~+1%）
+- -0.5%~+0.5% → 平開（預估 ±0.3%）
+- < -1.5% → 跳空低開
+
+【最終輸出】（嚴格 JSON，不加 markdown code block）
+{"gap_direction": "up"|"flat"|"down", "estimated_gap_pct": float, "key_driver": str, "tsm_signal": str, "night_futures_used": bool, "reasoning": str}
+"""
+
+
+def seed_pilot_shadow_profiles() -> int:
+    """Seed v2 (is_shadow=1) for Phase 1 pilot agents (currently tech_analyst).
+    Idempotent — skips agents that already have v2."""
+    try:
+        from market_analyst_agents import _MODEL_SONNET
+    except Exception as exc:
+        logger.error(f"[strategy_profile] cannot import model constants: {exc}")
+        return 0
+
+    pilots = [
+        # (agent_name, version, prompt, model, max_tokens, params, tool_whitelist)
+        ("tech_analyst", 2, _TECH_V2_SHADOW_PROMPT, _MODEL_SONNET, 1024,
+         {"max_iter": 3, "token_budget": 4000},
+         ["get_us_market_summary", "get_tw_night_futures"]),
+    ]
+    inserted = 0
+    for name, version, prompt, model, mt, params, tools in pilots:
+        if _profile_exists(name, version=version):
+            continue
+        _insert_profile(
+            agent_name=name, version=version,
+            is_active=0, is_shadow=1,
+            system_prompt=prompt, params=params, tool_whitelist=tools,
+            model_name=model, max_tokens=mt,
+            notes=f"Phase 1 pilot shadow v{version} — Day 6/8 seed",
+            created_by="seed_pilot_shadow", parent_version=1,
+        )
+        inserted += 1
+        logger.info(f"[strategy_profile] seeded {name} v{version} (shadow)")
+    return inserted
+
+
 def seed_initial_profiles() -> int:
     """
     Seed v1 (is_active=1) for each pipeline agent using current hard-coded
