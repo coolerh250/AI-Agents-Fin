@@ -563,6 +563,8 @@ def ensure_observability_tables() -> None:
     ensure_stock_info_table()           # Stock code → company name mapping
     ensure_login_tokens_table()         # LINE OTP login
     ensure_alert_history_table()        # Alert dedup (24h)
+    ensure_agent_strategy_profiles_table()  # Phase 1: strategy-as-data
+    ensure_shadow_runs_table()          # Phase 1: shadow rollout comparison
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1794,6 +1796,71 @@ def consume_login_token(token: str) -> Optional[str]:
     except Exception as exc:
         logger.warning(f"[login_tokens] consume_login_token failed: {exc}")
         return None
+
+
+def ensure_agent_strategy_profiles_table() -> None:
+    """Create agent_strategy_profiles table — strategy-as-data substrate.
+    Each row is a versioned (system_prompt + params + tool_whitelist + model)
+    set per agent. Invariants: at most one is_active=1 and one is_shadow=1
+    per agent_name. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS agent_strategy_profiles (
+                    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    agent_name      VARCHAR(50)    NOT NULL,
+                    version         INT            NOT NULL,
+                    is_active       TINYINT(1)     NOT NULL DEFAULT 0,
+                    is_shadow       TINYINT(1)     NOT NULL DEFAULT 0,
+                    system_prompt   MEDIUMTEXT     NOT NULL,
+                    params_json     JSON           NOT NULL,
+                    tool_whitelist  JSON           NOT NULL,
+                    model_name      VARCHAR(100)   NOT NULL,
+                    max_tokens      INT            NOT NULL DEFAULT 1024,
+                    notes           TEXT           NULL,
+                    created_by      VARCHAR(50)    NOT NULL DEFAULT 'human',
+                    parent_version  INT            NULL,
+                    created_at      TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+                    activated_at    TIMESTAMP      NULL,
+                    deprecated_at   TIMESTAMP      NULL,
+                    UNIQUE KEY uq_agent_version (agent_name, version),
+                    INDEX idx_asp_active (agent_name, is_active),
+                    INDEX idx_asp_shadow (agent_name, is_shadow)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_agent_strategy_profiles_table failed: {exc}")
+
+
+def ensure_shadow_runs_table() -> None:
+    """Create shadow_runs table — captures (primary, shadow) output pairs and
+    their divergence score for offline review. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS shadow_runs (
+                    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    run_id              VARCHAR(36)    NOT NULL,
+                    agent_name          VARCHAR(50)    NOT NULL,
+                    primary_version     INT            NOT NULL,
+                    shadow_version      INT            NOT NULL,
+                    primary_output      MEDIUMTEXT     NOT NULL,
+                    shadow_output       MEDIUMTEXT     NOT NULL,
+                    primary_latency_ms  INT            NULL,
+                    shadow_latency_ms   INT            NULL,
+                    primary_cost_usd    DECIMAL(10,6)  NULL,
+                    shadow_cost_usd     DECIMAL(10,6)  NULL,
+                    divergence_score    DECIMAL(5,3)   NULL,
+                    divergence_kind     VARCHAR(30)    NULL,
+                    divergence_detail   JSON           NULL,
+                    shadow_error        TEXT           NULL,
+                    created_at          TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_sr_run (run_id),
+                    INDEX idx_sr_agent_date (agent_name, created_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_shadow_runs_table failed: {exc}")
 
 
 def ensure_alert_history_table() -> None:
