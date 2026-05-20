@@ -1,0 +1,53 @@
+# TiDB single-node cluster for AI Agent Studio
+# Bound to 127.0.0.1 only (security: see docs/reality_audit/security_reality_report.md S-2).
+# Start:  docker compose -f docker/docker-compose.yml up -d
+# Stop:   docker compose -f docker/docker-compose.yml down
+# Data persists under docker/data/{pd,tikv}/
+
+services:
+  pd:
+    image: pingcap/pd:v8.5.0
+    container_name: tidb-pd
+    restart: unless-stopped
+    volumes:
+      - ./data/pd:/data
+    command:
+      - --name=pd
+      - --data-dir=/data
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd:2379
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=pd=http://pd:2380
+
+  tikv:
+    image: pingcap/tikv:v8.5.0
+    container_name: tidb-tikv
+    restart: unless-stopped
+    volumes:
+      - ./data/tikv:/data
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --status-addr=0.0.0.0:20180
+      - --data-dir=/data
+      - --pd=pd:2379
+    depends_on:
+      - pd
+
+  tidb:
+    image: pingcap/tidb:v8.5.0
+    container_name: tidb-tidb
+    restart: unless-stopped
+    ports:
+      # Host-only binding — TiDB is not exposed to the LAN.
+      - "127.0.0.1:4000:4000"
+      - "127.0.0.1:10080:10080"
+    command:
+      - --store=tikv
+      - --path=pd:2379
+      - --host=0.0.0.0
+      - --advertise-address=tidb
+      - --status-host=0.0.0.0
+    depends_on:
+      - tikv

@@ -121,6 +121,48 @@ def get_actual(trade_date: date) -> Optional[dict]:
     return dict(row._mapping) if row else None
 
 
+def ensure_daily_briefs_table() -> None:
+    """Create daily_briefs table. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS daily_briefs (
+                    id                BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    trade_date        DATE          NOT NULL,
+                    brief_text        TEXT          NOT NULL,
+                    predicted_gap_pct DECIMAL(6,3)  NULL,
+                    gap_direction     VARCHAR(10)   NULL,
+                    line_report       TEXT          NULL,
+                    created_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_trade_date (trade_date),
+                    INDEX idx_db_created (created_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_daily_briefs_table failed: {exc}")
+
+
+def ensure_market_actuals_table() -> None:
+    """Create market_actuals table. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS market_actuals (
+                    id              BIGINT         AUTO_INCREMENT PRIMARY KEY,
+                    trade_date      DATE           NOT NULL,
+                    open_price      DECIMAL(10,2)  NULL,
+                    close_price     DECIMAL(10,2)  NULL,
+                    actual_gap_pct  DECIMAL(6,3)   NULL,
+                    notes           VARCHAR(200)   NULL,
+                    created_at      TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_ma_trade_date (trade_date),
+                    INDEX idx_ma_created (created_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_market_actuals_table failed: {exc}")
+
+
 def ensure_cost_logs_table() -> None:
     with _engine().begin() as conn:
         conn.execute(text("""
@@ -501,6 +543,8 @@ def ensure_observability_tables() -> None:
             )
         """))
 
+    ensure_daily_briefs_table()         # Core: investment briefs
+    ensure_market_actuals_table()       # Core: backtest actuals
     ensure_tool_audit_log_table()       # Phase 2
     ensure_session_episodes_table()     # Phase 4
     ensure_eval_tables()                # Evaluation Framework
