@@ -32,7 +32,7 @@ def record_usage(
     try:
         from database_tools import log_cost, log_llm_trace
 
-        usage        = response.usage_metadata or {}
+        usage = _extract_usage(response)
         in_tok       = usage.get("input_tokens", 0)
         out_tok      = usage.get("output_tokens", 0)
         thinking_tok = usage.get("thinking_tokens", 0)
@@ -98,12 +98,51 @@ def emit_event(
 
 
 def _extract_text(response) -> str:
+    """Pull plain text out of either a langchain AIMessage or an anthropic
+    SDK Message. langchain content can be str or list[dict]; anthropic SDK
+    content is list of block objects with .type/.text attrs."""
     c = response.content
     if isinstance(c, str):
         return c.strip()
-    return "\n".join(
-        b["text"] for b in c if isinstance(b, dict) and b.get("type") == "text"
-    ).strip()
+    parts: list[str] = []
+    for b in c or []:
+        # langchain dict-style blocks
+        if isinstance(b, dict):
+            if b.get("type") == "text" and b.get("text"):
+                parts.append(b["text"])
+            continue
+        # anthropic SDK object-style blocks
+        if getattr(b, "type", None) == "text":
+            t = getattr(b, "text", None)
+            if t:
+                parts.append(t)
+    return "\n".join(parts).strip()
+
+
+def _extract_usage(response) -> dict:
+    """Read usage counts from either a langchain AIMessage (usage_metadata
+    dict) or an anthropic SDK Message (usage object with int attrs)."""
+    meta = getattr(response, "usage_metadata", None)
+    if meta:
+        return {
+            "input_tokens":    int(meta.get("input_tokens", 0) or 0),
+            "output_tokens":   int(meta.get("output_tokens", 0) or 0),
+            "thinking_tokens": int(meta.get("thinking_tokens", 0) or 0),
+        }
+    u = getattr(response, "usage", None)
+    if u is None:
+        return {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
+    return {
+        "input_tokens":    int(getattr(u, "input_tokens", 0) or 0),
+        "output_tokens":   int(getattr(u, "output_tokens", 0) or 0),
+        # anthropic SDK exposes thinking tokens under different attrs
+        # across versions; check the common ones, default to 0.
+        "thinking_tokens": int(
+            getattr(u, "thinking_tokens", None)
+            or getattr(u, "cache_creation_input_tokens", 0)
+            or 0
+        ),
+    }
 
 
 def timed_invoke(llm, messages: list) -> tuple:
