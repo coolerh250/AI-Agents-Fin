@@ -41,14 +41,16 @@ def _send_critical(msg: str) -> None:
 
 
 def _send_warning(msg: str) -> None:
-    from messenger_tools import send_telegram
-    send_telegram(msg)
+    from messenger_tools import send_line, send_telegram
+    if send_telegram(msg).get("status") != "ok":
+        send_line(msg)  # fallback when Telegram is unconfigured/unavailable
     logger.warning(f"[WARNING] {msg[:80]}")
 
 
 def _send_info(msg: str) -> None:
-    from messenger_tools import send_telegram
-    send_telegram(msg)
+    from messenger_tools import send_line, send_telegram
+    if send_telegram(msg).get("status") != "ok":
+        send_line(msg)  # fallback when Telegram is unconfigured/unavailable
     logger.info(f"[INFO] {msg[:80]}")
 
 

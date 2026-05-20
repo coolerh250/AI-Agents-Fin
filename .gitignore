@@ -16,6 +16,8 @@ wheels/
 # Runtime output
 market_snapshot.json
 collection_journal.jsonl
+checkpoints.db
+investment_brief_*.txt
 
 # uv lock (optional — include if you want reproducible installs)
 # uv.lock

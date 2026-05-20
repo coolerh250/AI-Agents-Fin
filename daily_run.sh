@@ -1,6 +1,6 @@
 #!/bin/bash
 # daily_run.sh — Taiwan Stock Futures Analysis Team daily automation
-# Crontab: 20 8 * * 1-5 /home/itadmin/ai_agent_studio/daily_run.sh >> /home/itadmin/ai_agent_studio/logs/daily_run.log 2>&1
+# Crontab: 0 8 * * 1-5 /home/itadmin/ai_agent_studio/daily_run.sh >> /home/itadmin/ai_agent_studio/logs/daily_run.log 2>&1
 set -euo pipefail
 
 LOG_DIR="/home/itadmin/ai_agent_studio/logs"
@@ -15,6 +15,11 @@ echo "[$(ts)] ===== 台股期貨分析團隊 daily run ====="
 
 echo "[$(ts)] Step 1: 市場資料採集"
 uv run test_collection.py
+
+echo "[$(ts)] Step 1.5: 前一交易日回測（自我評估，回填 market_actuals / session_episodes / strategy_lessons）"
+# 須在 Step 2 之前執行：此時最新的建議書仍是「前一交易日」，TWSE 當日收盤資料已公布。
+# 回測產出的 actuals 與 lessons 會即時供 Step 2 的 chief_strategist 注入。
+uv run python backtest_agent.py || echo "⚠️  backtest_agent 失敗（略過）"
 
 echo "[$(ts)] Step 2: 分析團隊執行 + 建議書存入 DB"
 uv run investment_workflow.py

@@ -69,9 +69,13 @@ def build_graph():
     # Phase 4: checkpointer — enables resume-on-failure
     # Prefers SqliteSaver (persistent); falls back to MemorySaver (in-process)
     try:
+        import sqlite3
         from langgraph.checkpoint.sqlite import SqliteSaver
-        checkpointer = SqliteSaver.from_conn_string("./checkpoints.db")
-        logger.debug("[build_graph] Using SqliteSaver checkpointer")
+        # SqliteSaver.from_conn_string is a context manager; for a long-lived
+        # checkpointer we construct it directly from a shared connection.
+        _conn = sqlite3.connect("checkpoints.db", check_same_thread=False)
+        checkpointer = SqliteSaver(_conn)
+        logger.debug("[build_graph] Using SqliteSaver checkpointer (checkpoints.db)")
     except ImportError:
         from langgraph.checkpoint.memory import MemorySaver
         checkpointer = MemorySaver()

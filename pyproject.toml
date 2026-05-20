@@ -9,6 +9,7 @@ dependencies = [
     "httpx>=0.28.1",
     "langchain-anthropic>=1.4.3",
     "langgraph>=1.2.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
     "loguru>=0.7.3",
     "lxml>=6.1.0",
     "mcp>=1.27.1",
