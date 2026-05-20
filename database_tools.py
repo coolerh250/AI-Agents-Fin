@@ -566,6 +566,7 @@ def ensure_observability_tables() -> None:
     ensure_alert_history_table()        # Alert dedup (24h)
     ensure_agent_strategy_profiles_table()  # Phase 1: strategy-as-data
     ensure_shadow_runs_table()          # Phase 1: shadow rollout comparison
+    ensure_optimizer_proposals_table()  # Phase 2: optimizer proposal ledger
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1932,6 +1933,65 @@ def ensure_shadow_runs_table() -> None:
             """))
     except Exception as exc:
         logger.warning(f"[migration] ensure_shadow_runs_table failed: {exc}")
+
+
+def ensure_optimizer_proposals_table() -> None:
+    """Create optimizer_proposals table — ledger of Optimizer Agent proposals.
+    Each row pairs with one agent_strategy_profiles row written with
+    created_by='optimizer'. status transitions: shadowing → promoted|rejected,
+    promoted → reverted. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS optimizer_proposals (
+                    id                  BIGINT         AUTO_INCREMENT PRIMARY KEY,
+                    agent_name          VARCHAR(50)    NOT NULL,
+                    proposed_version    INT            NOT NULL,
+                    parent_version      INT            NOT NULL,
+                    input_window_days   INT            NOT NULL,
+                    sample_count        INT            NOT NULL,
+                    score_baseline      DECIMAL(5,3)   NULL,
+                    score_predicted     DECIMAL(5,3)   NULL,
+                    score_actual        DECIMAL(5,3)   NULL,
+                    reasoning           MEDIUMTEXT     NOT NULL,
+                    diff_summary        JSON           NOT NULL,
+                    optimizer_cost_usd  DECIMAL(10,6)  NULL,
+                    status              VARCHAR(20)    NOT NULL DEFAULT 'shadowing',
+                    created_at          TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+                    decided_at          TIMESTAMP      NULL,
+                    decided_by          VARCHAR(50)    NULL,
+                    UNIQUE KEY uq_op_agent_version (agent_name, proposed_version),
+                    INDEX idx_op_agent_status (agent_name, status),
+                    INDEX idx_op_created (created_at),
+                    INDEX idx_op_decided (decided_at)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_optimizer_proposals_table failed: {exc}")
+
+
+def get_promoted_within_days(days: int = 7) -> list[dict]:
+    """Return optimizer_proposals rows promoted within the last N days.
+    Used by optimizer_revert_check to watch for post-promotion regressions."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT id, agent_name, proposed_version, parent_version,
+                           score_baseline, score_predicted, score_actual,
+                           decided_at, decided_by, created_at
+                    FROM optimizer_proposals
+                    WHERE status = 'promoted'
+                      AND decided_at IS NOT NULL
+                      AND decided_at >= NOW() - INTERVAL :days DAY
+                    ORDER BY decided_at DESC
+                """),
+                {"days": days},
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.debug(f"[optimizer] get_promoted_within_days failed: {exc}")
+        return []
 
 
 def ensure_alert_history_table() -> None:
