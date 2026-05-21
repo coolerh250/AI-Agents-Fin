@@ -875,9 +875,9 @@ _TOOL_PERMISSION_RULES: dict[str, list[str]] = {
     "delete_portfolio_item": ["dashboard", "line_webhook"],
     "update_portfolio_item": ["dashboard", "line_webhook"],
     "send_line":           ["send_notification", "alert_runner", "investment_workflow",
-                            "daily_run", "backtest_agent"],
+                            "daily_run", "backtest_agent", "optimizer_revert_check"],
     "send_telegram":       ["send_notification", "alert_runner", "investment_workflow",
-                            "daily_run", "backtest_agent"],
+                            "daily_run", "backtest_agent", "optimizer_revert_check"],
     # Phase 1 — tool catalog readers (agent_loop is the synthetic caller used
     # by ReAct loops; portfolio_manager / tech_analyst are also allowed for
     # direct calls outside the loop):

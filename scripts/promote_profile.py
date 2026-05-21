@@ -2,12 +2,13 @@
 """
 scripts/promote_profile.py
 CLI for managing agent_strategy_profiles versions:
-    status  <agent>           — show active + shadow + recent shadow stats
-    list    <agent>           — show every version row for the agent
-    promote <agent> <version> — set <version> active (clears old active,
-                                clears shadow flag if it was the shadow)
-    revert  <agent> <version> — same as promote; explicit "going back"
-    shadow  <agent> <version> — mark <version> is_shadow=1 (clears old shadow)
+    status    <agent>           — show active + shadow + recent shadow stats
+    list      <agent>           — show every version row for the agent
+    proposals <agent>           — show optimizer_proposals ledger for the agent
+    promote   <agent> <version> — set <version> active (clears old active,
+                                  clears shadow flag if it was the shadow)
+    revert    <agent> <version> — same as promote; explicit "going back"
+    shadow    <agent> <version> — mark <version> is_shadow=1 (clears old shadow)
 
 All mutations run in a transaction and write an entry to audit_log.
 """
@@ -62,6 +63,38 @@ def cmd_list(agent: str) -> int:
     return 0
 
 
+def cmd_proposals(agent: str) -> int:
+    with _engine().connect() as c:
+        rows = c.execute(
+            text("""
+                SELECT proposed_version, parent_version, status,
+                       score_baseline, score_predicted, score_actual,
+                       sample_count, optimizer_cost_usd, created_at, decided_by
+                FROM optimizer_proposals
+                WHERE agent_name = :a
+                ORDER BY proposed_version DESC
+            """),
+            {"a": agent},
+        ).fetchall()
+    if not rows:
+        print(f"  (no optimizer proposals for {agent})")
+        return 1
+    print(f"  Optimizer proposals for {agent!r}:")
+    print(f"  {'ver':>3} {'parent':>6} {'status':<11} {'baseline':>8} "
+          f"{'predict':>8} {'actual':>8} {'n':>4} {'cost':>9} {'by':<14} created")
+
+    def _f(x):
+        return f"{float(x):.3f}" if x is not None else "—"
+
+    for r in rows:
+        pv, par, st, sb, sp, sa, n, cost, created, by = r
+        cost_s = f"${float(cost):.4f}" if cost is not None else "—"
+        print(f"  {int(pv):>3} {int(par):>6} {st:<11} {_f(sb):>8} "
+              f"{_f(sp):>8} {_f(sa):>8} {int(n or 0):>4} {cost_s:>9} "
+              f"{(by or '—'):<14} {created}")
+    return 0
+
+
 def cmd_status(agent: str) -> int:
     from strategy_profile import load_active_profile, load_shadow_profile
     from database_tools import get_recent_shadow_runs
@@ -113,9 +146,27 @@ def _audit(conn, agent: str, op: str, before: dict, after: dict) -> None:
     )
 
 
+def _sync_proposal_status(conn, agent: str, version: int,
+                          new_status: str, from_status: str) -> int:
+    """If an optimizer_proposals row exists for (agent, version) in
+    `from_status`, move it to `new_status`. Returns rows updated."""
+    result = conn.execute(
+        text("""
+            UPDATE optimizer_proposals
+            SET status = :ns, decided_at = NOW(), decided_by = 'promote_profile_cli'
+            WHERE agent_name = :a AND proposed_version = :v AND status = :fs
+        """),
+        {"ns": new_status, "a": agent, "v": version, "fs": from_status},
+    )
+    return result.rowcount
+
+
 def _promote(agent: str, version: int, op_name: str) -> int:
     """Transaction: set <version> is_active=1 + clears its is_shadow flag,
-    set all other versions for this agent is_active=0."""
+    set all other versions for this agent is_active=0. Also syncs the
+    optimizer_proposals ledger: PROMOTE marks the target's shadowing
+    proposal 'promoted'; REVERT marks the abandoned version's promoted
+    proposal 'reverted'."""
     with _engine().begin() as conn:
         before_rows = conn.execute(
             text("""
@@ -126,6 +177,7 @@ def _promote(agent: str, version: int, op_name: str) -> int:
             {"a": agent},
         ).fetchall()
         before_state = [dict(r._mapping) for r in before_rows]
+        prev_active = [int(r[0]) for r in before_rows if int(r[1]) == 1]
         target = next((r for r in before_rows if int(r[0]) == version), None)
         if not target:
             print(f"  ERROR: {agent} has no version {version}")
@@ -151,6 +203,13 @@ def _promote(agent: str, version: int, op_name: str) -> int:
             """),
             {"a": agent, "v": version},
         )
+        # Sync the optimizer_proposals ledger
+        if op_name == "PROMOTE":
+            _sync_proposal_status(conn, agent, version, "promoted", "shadowing")
+        elif op_name == "REVERT":
+            for pv in prev_active:
+                if pv != version:
+                    _sync_proposal_status(conn, agent, pv, "reverted", "promoted")
         after_rows = conn.execute(
             text("""
                 SELECT version, is_active, is_shadow
@@ -208,7 +267,7 @@ def main() -> int:
         description="Manage agent_strategy_profiles versions (active / shadow / revert).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for c in ("status", "list"):
+    for c in ("status", "list", "proposals"):
         sp = sub.add_parser(c)
         sp.add_argument("agent")
     for c in ("promote", "revert", "shadow"):
@@ -219,6 +278,7 @@ def main() -> int:
 
     if args.cmd == "status":   return cmd_status(args.agent)
     if args.cmd == "list":     return cmd_list(args.agent)
+    if args.cmd == "proposals": return cmd_proposals(args.agent)
     if args.cmd == "promote":  return cmd_promote(args.agent, args.version)
     if args.cmd == "revert":   return cmd_revert(args.agent, args.version)
     if args.cmd == "shadow":   return cmd_shadow(args.agent, args.version)
