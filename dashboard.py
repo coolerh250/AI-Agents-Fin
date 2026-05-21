@@ -31,6 +31,7 @@ from database_tools import (
     get_recent_lessons,
     get_recent_llm_traces,
     get_recent_shadow_runs,
+    get_optimizer_proposals,
     get_shadow_summary_per_agent,
     get_workflow_runs,
     save_actual,
@@ -137,7 +138,7 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 (tab_accuracy, tab_cost, tab_portfolio, tab_health, tab_events,
- tab_eval, tab_flywheel, tab_audit, tab_shadow) = st.tabs([
+ tab_eval, tab_flywheel, tab_audit, tab_shadow, tab_optimizer) = st.tabs([
     "📊 預測準確度",
     "💰 API 成本分析",
     "💼 個人持倉管理",
@@ -147,6 +148,7 @@ def _calc_accuracy_kpi(rows: list[dict]) -> dict:
     "🔄 Flywheel",
     "🔍 稽核 / Trace",
     "👥 Shadow 比對",
+    "🧪 Optimizer 提案",
 ])
 
 
@@ -796,3 +798,61 @@ with tab_shadow:
         except Exception:
             pass
         st.dataframe(run_df, use_container_width=True, hide_index=True)
+
+
+# ── Tab 10: Optimizer 提案 (Phase 2) ──────────────────────────────────────────
+
+with tab_optimizer:
+    st.subheader("Optimizer 提案紀錄")
+    st.caption("Phase 2 自我優化：Optimizer Agent 每週檢視各 agent 的 shadow 表現，"
+               "在有資料佐證時提出新的 shadow 策略版本（status=shadowing）。"
+               "提案永遠不會自動上線 —— 由人工用 promote_profile.py 審核後才可能採用。")
+
+    proposals = get_optimizer_proposals(limit=100)
+    if not proposals:
+        st.info("尚無 Optimizer 提案。Optimizer 需 `OPTIMIZER_ENABLED=1` 且該 agent "
+                "累積 ≥10 個 shadow runs，才會在每週日排程時產生提案。")
+    else:
+        status_counts: dict = {}
+        for p in proposals:
+            status_counts[p["status"]] = status_counts.get(p["status"], 0) + 1
+        cols = st.columns(4)
+        for col, key in zip(cols, ("shadowing", "promoted", "rejected", "reverted")):
+            col.metric(key, status_counts.get(key, 0))
+
+        def _r3(v):
+            return round(float(v), 3) if v is not None else None
+
+        prop_df = pd.DataFrame([
+            {
+                "agent":     p["agent_name"],
+                "ver":       p["proposed_version"],
+                "parent":    p["parent_version"],
+                "status":    p["status"],
+                "baseline":  _r3(p["score_baseline"]),
+                "predicted": _r3(p["score_predicted"]),
+                "actual":    _r3(p["score_actual"]),
+                "samples":   int(p["sample_count"] or 0),
+                "opt $":     round(float(p["optimizer_cost_usd"]), 4)
+                             if p["optimizer_cost_usd"] is not None else None,
+                "created":   str(p["created_at"]),
+            }
+            for p in proposals
+        ])
+        st.dataframe(prop_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("提案細節")
+        for p in proposals[:10]:
+            with st.expander(f"{p['agent_name']} v{p['proposed_version']} — {p['status']}"):
+                st.write(f"**parent_version:** {p['parent_version']}　·　"
+                         f"**window:** {p['input_window_days']}d　·　"
+                         f"**samples:** {p['sample_count']}")
+                st.write(f"**score** — baseline={p['score_baseline']}　"
+                         f"predicted={p['score_predicted']}　actual={p['score_actual']}")
+                if p.get("decided_by"):
+                    st.write(f"**decided:** {p['decided_at']} by {p['decided_by']}")
+                st.markdown("**reasoning:**")
+                st.text(p["reasoning"] or "—")
+                st.markdown("**diff_summary:**")
+                st.json(p["diff_summary"] or {})

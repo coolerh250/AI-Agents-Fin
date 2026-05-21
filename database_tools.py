@@ -1998,6 +1998,37 @@ def get_promoted_within_days(days: int = 7) -> list[dict]:
         return []
 
 
+def get_optimizer_proposals(agent_name: Optional[str] = None,
+                            limit: int = 50) -> list[dict]:
+    """Return optimizer_proposals rows, newest first, optionally filtered by
+    agent_name. Used by the dashboard Optimizer tab."""
+    try:
+        params: dict = {"lim": limit}
+        where = ""
+        if agent_name:
+            where = "WHERE agent_name = :a"
+            params["a"] = agent_name
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text(f"""
+                    SELECT id, agent_name, proposed_version, parent_version,
+                           input_window_days, sample_count, score_baseline,
+                           score_predicted, score_actual, status,
+                           optimizer_cost_usd, reasoning, diff_summary,
+                           created_at, decided_at, decided_by
+                    FROM optimizer_proposals
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT :lim
+                """),
+                params,
+            ).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as exc:
+        logger.debug(f"[dashboard] get_optimizer_proposals failed: {exc}")
+        return []
+
+
 def ensure_alert_history_table() -> None:
     """Create alert_history table for 24h alert dedup. Idempotent."""
     try:
