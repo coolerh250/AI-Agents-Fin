@@ -105,6 +105,23 @@ def load_shadow_profile(agent_name: str) -> Optional[StrategyProfile]:
         return None
 
 
+def load_profile_version(agent_name: str, version: int) -> Optional[StrategyProfile]:
+    """Return a specific (agent_name, version) row, or None. Used by the
+    Phase 2 optimizer to load the parent profile it forks from."""
+    try:
+        from database_tools import _engine
+        with _engine().connect() as conn:
+            row = conn.execute(
+                text(f"SELECT {_PROFILE_COLS} FROM agent_strategy_profiles "
+                     f"WHERE agent_name = :a AND version = :v LIMIT 1"),
+                {"a": agent_name, "v": version},
+            ).fetchone()
+        return _row_to_profile(row) if row else None
+    except Exception as exc:
+        logger.warning(f"[strategy_profile] load_profile_version({agent_name} v{version}) failed: {exc}")
+        return None
+
+
 def load_profile_or_fallback(
     agent_name: str,
     fallback_prompt: str,

@@ -887,6 +887,10 @@ _TOOL_PERMISSION_RULES: dict[str, list[str]] = {
                             "daily_run"],
     "calculate_pnl":       ["portfolio_manager", "dashboard", "agent_loop",
                             "daily_run"],
+    # Phase 2 — the Optimizer Agent's single write tool. Only the optimizer
+    # may propose new strategy versions; the ReAct synthetic caller and any
+    # pipeline agent are intentionally NOT allowed.
+    "propose_strategy_version": ["optimizer_agent"],
 }
 
 
