@@ -11,7 +11,8 @@ optimizer from doing anything a human reviewer would not expect:
   * tools may only be REMOVED from the parent whitelist, never added.
   * system_prompt: only the text inside a single
     <!-- OPTIMIZER:WEIGHTS --> ... <!-- /OPTIMIZER:WEIGHTS --> block
-    may change; everything outside stays byte-identical to the parent.
+    may change; everything outside stays byte-identical to the parent,
+    and the replacement text may not exceed 1.5x the parent block length.
 
 On any violation the tool returns {"error": "bounded_change_violation",
 ...} and writes nothing. On success it writes, in one transaction:
@@ -55,6 +56,12 @@ ALLOWED_PARAM_KEYS = {"max_iter", "token_budget", "weights", "thresholds"}
 MIN_ITER_LIMIT, MAX_ITER_LIMIT = 1, 8
 TOKEN_BUDGET_MIN, TOKEN_BUDGET_MAX = 1000, 12000
 MIN_REASONING_CHARS = 30
+
+# A marker-block edit may not exceed GROWTH_FACTOR x the parent block length,
+# floored at MIN_BUDGET chars so a tiny parent block can still grow sensibly.
+# Stops the optimizer from quietly bloating the prompt.
+MARKER_TEXT_GROWTH_FACTOR = 1.5
+MARKER_TEXT_MIN_BUDGET = 200
 
 
 class _BoundedChangeError(Exception):
@@ -158,9 +165,20 @@ def _splice_prompt(parent_prompt: str, new_marker_text: Optional[str]) -> str:
     if i_end <= i_start:
         raise _BoundedChangeError("OPTIMIZER:WEIGHTS end marker precedes start marker")
 
+    old_inner = parent_prompt[i_start + len(MARKER_START):i_end].strip()
+    new_inner = new_marker_text.strip()
+    max_len = max(int(len(old_inner) * MARKER_TEXT_GROWTH_FACTOR),
+                  MARKER_TEXT_MIN_BUDGET)
+    if len(new_inner) > max_len:
+        raise _BoundedChangeError(
+            f"new_prompt_marker_text length {len(new_inner)} exceeds the "
+            f"{max_len}-char limit ({MARKER_TEXT_GROWTH_FACTOR}x the parent "
+            f"block); keep weight/threshold edits concise"
+        )
+
     before = parent_prompt[: i_start + len(MARKER_START)]
     after = parent_prompt[i_end:]
-    return f"{before}\n{new_marker_text.strip()}\n{after}"
+    return f"{before}\n{new_inner}\n{after}"
 
 
 # ── The write tool ────────────────────────────────────────────────────────────
@@ -376,7 +394,8 @@ def build_propose_tool_spec():
                 },
                 "new_prompt_marker_text": {
                     "type": ["string", "null"],
-                    "description": "OPTIMIZER:WEIGHTS 區塊的新內容；不改 prompt 則留空",
+                    "description": "OPTIMIZER:WEIGHTS 區塊的新內容；不改 prompt 則留空。"
+                                   "長度不可超過父版區塊的 1.5 倍，請保持精簡。",
                 },
                 "tools_to_remove": {
                     "type": "array", "items": {"type": "string"},
