@@ -1,0 +1,1 @@
+# keep logs/ dir in repo so cron output redirection never fails on a fresh clone

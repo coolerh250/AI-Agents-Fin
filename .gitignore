@@ -19,6 +19,9 @@ collection_journal.jsonl
 checkpoints.db
 investment_brief_*.txt
 
+# Log files (keep the logs/ dir itself via logs/.gitkeep)
+logs/*.log
+
 # uv lock (optional — include if you want reproducible installs)
 # uv.lock
 
