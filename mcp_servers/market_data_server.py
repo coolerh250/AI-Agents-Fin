@@ -7,7 +7,7 @@ Env: public APIs only — no credentials required
 import asyncio
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -116,11 +116,15 @@ def _fetch_tsm_raw() -> dict:
 @mcp.tool()
 async def get_tw_future_chips() -> dict:
     """Fetch TAIFEX institutional traders futures open interest (三大法人期貨留倉部位).
-    Scrapes https://www.taifex.com.tw. Returns {"error": true} on holiday/failure."""
-    logger.info("Tool 'get_tw_future_chips' invoked")
-    date_str = date.today().strftime("%Y/%m/%d")
+    Scrapes https://www.taifex.com.tw. Returns {"error": true} on holiday/failure.
 
-    def _fetch(commodity_id: str = "TXF") -> dict:
+    TAIFEX only publishes a trading day's institutional OI AFTER that day's
+    close (~15:00 Taipei). A pre-market run (08:00) therefore has no data
+    for today — so we walk back from today up to 7 calendar days and return
+    the most recent published session (covers weekends + long holidays)."""
+    logger.info("Tool 'get_tw_future_chips' invoked")
+
+    def _fetch(date_str: str, commodity_id: str = "TXF") -> dict:
         payload = {
             "queryType": "1", "goDay": "", "doQuery": "1",
             "dateaddcnt": "", "queryDate": date_str, "commodityId": commodity_id,
@@ -169,15 +173,26 @@ async def get_tw_future_chips() -> dict:
         return {"date": date_str, "source": "TAIFEX futContractsDate POST",
                 "product": "臺股期貨 (TXF)", "data": data}
 
-    try:
-        return await _aretry(lambda: _fetch("TXF"))
-    except Exception as exc:
-        logger.warning(f"TXF filter failed ({exc}), retrying without filter")
+    last_exc: Exception | None = None
+    # Walk back from today; first session with data wins.
+    for back in range(0, 8):
+        date_str = (date.today() - timedelta(days=back)).strftime("%Y/%m/%d")
         try:
-            return await _aretry(lambda: _fetch(""))
-        except Exception as exc2:
-            logger.error(f"[get_tw_future_chips] Both attempts failed: {exc2}")
-            return {"error": True, "message": str(exc2), "source": "TAIFEX futContractsDate"}
+            result = await _aretry(lambda ds=date_str: _fetch(ds, "TXF"))
+            if back > 0:
+                logger.info(f"[get_tw_future_chips] used {date_str} "
+                            f"(today's session not yet published)")
+            return result
+        except Exception as exc:
+            last_exc = exc
+    # Last resort: most recent date without the TXF commodity filter.
+    try:
+        ds = (date.today() - timedelta(days=1)).strftime("%Y/%m/%d")
+        return await _aretry(lambda: _fetch(ds, ""))
+    except Exception as exc2:
+        last_exc = exc2
+    logger.error(f"[get_tw_future_chips] no data in last 7 days: {last_exc}")
+    return {"error": True, "message": str(last_exc), "source": "TAIFEX futContractsDate"}
 
 
 @mcp.tool()
