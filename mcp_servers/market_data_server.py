@@ -29,7 +29,9 @@ _INJECTION_RE = re.compile(
 )
 
 _TAIFEX_URL       = "https://www.taifex.com.tw/cht/3/futContractsDate"
-_TAIFEX_NIGHT_URL = "https://www.taifex.com.tw/cht/5/afterHoursPrice"
+# MIS quote API — after-hours (night) session quotes. The old
+# cht/5/afterHoursPrice HTML page was removed by TAIFEX and now 404s.
+_TAIFEX_NIGHT_URL = "https://mis.taifex.com.tw/futures/api/getQuoteList"
 _ANUE_URL   = "https://api.cnyes.com/media/api/v1/newslist/category/tw_stock?limit=20&page=1"
 _YAHOO_V8   = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=2d"
 _HEADERS = {
@@ -70,6 +72,19 @@ async def _aretry(fn: Callable, retries: int = 1, delay: float = 2.0) -> Any:
 
 def _parse_num(text: str) -> int:
     return int(text.strip().replace(",", "").replace("+", "").replace("\xa0", ""))
+
+
+def _num(value) -> "float | None":
+    """Parse a MIS quote numeric field; returns None for blanks / dashes."""
+    if value is None:
+        return None
+    s = str(value).replace(",", "").replace("+", "").strip()
+    if s in ("", "-", "--", "—"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 def _fetch_symbol(sym: str) -> dict:
@@ -312,62 +327,68 @@ async def get_financial_news(max_items: int = 15) -> dict:
 
 @mcp.tool()
 async def get_tw_night_futures() -> dict:
-    """Fetch TAIFEX 台指期 (TXF) after-hours session close price and change.
-    Source: https://www.taifex.com.tw/cht/5/afterHoursPrice
+    """Fetch TAIFEX 台指期 (TXF) after-hours (night) session quote.
+
+    Source: TAIFEX MIS quote API, MarketType=1 (after-hours session). The
+    old cht/5/afterHoursPrice HTML page was removed by TAIFEX and now 404s.
+    Returns the near-month TXF future — the most-traded 臺指期 contract.
+
     Returns: {"night_close": int, "night_chg": float, "night_chg_pct": float,
-              "volume": int, "product": str, "as_of": str}
-    or {"error": true, "message": str} on holiday / pre-session / parse failure."""
+              "volume": int, "product": str, "as_of": str, "source": str}
+    or {"error": true, "message": str} on holiday / pre-session / failure."""
     logger.info("Tool 'get_tw_night_futures' invoked")
 
     def _fetch() -> dict:
+        payload = {
+            "MarketType": "1", "SymbolType": "F", "KindID": "1", "CID": "TXF",
+            "ExpireMonth": "", "RowSize": "全部", "PageNo": "",
+            "SortColumn": "", "AscDesc": "A",
+        }
         with httpx.Client(timeout=15.0, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(_TAIFEX_NIGHT_URL)
+            resp = client.post(_TAIFEX_NIGHT_URL, json=payload)
             resp.raise_for_status()
 
-        soup = BeautifulSoup(resp.text, "lxml")
-        # TAIFEX afterHoursPrice table columns (typical order):
-        # 商品 | 月份 | 最後成交價 | 漲跌 | 漲跌幅% | 成交量 | …
-        for table in soup.find_all("table"):
-            for tr in table.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) < 5:
-                    continue
-                first = tds[0].get_text(strip=True)
-                if "臺股期貨" not in first and "TX" not in first:
-                    continue
+        obj = resp.json()
+        if obj.get("RtCode") != "0":
+            raise ValueError(f"MIS RtCode={obj.get('RtCode')} {obj.get('RtMsg')}")
+        quotes = (obj.get("RtData") or {}).get("QuoteList") or []
 
-                def _td(idx: int, flt: bool = False):
-                    txt = tds[idx].get_text(strip=True).replace(",", "").replace("+", "")
-                    if not txt or txt in ("-", "--", "—"):
-                        return None
-                    return float(txt) if flt else int(float(txt))
+        # Near-month TXF future = the 臺指期 contract with the most volume
+        # (skip 臺指現貨 spot and any contract without a traded price).
+        best = None  # (volume, quote, last_price)
+        for q in quotes:
+            if "臺指期" not in (q.get("DispCName") or ""):
+                continue
+            last = _num(q.get("CLastPrice"))
+            if last is None:
+                continue
+            vol = _num(q.get("CTotalVolume")) or 0.0
+            if best is None or vol > best[0]:
+                best = (vol, q, last)
+        if best is None:
+            raise ValueError("no TXF after-hours quote — holiday or pre-session")
 
-                night_close = _td(2)
-                night_chg   = _td(3, flt=True)
-                chg_pct_raw = tds[4].get_text(strip=True).replace("+", "").replace("%", "").replace(",", "")
-                night_chg_pct = float(chg_pct_raw) if chg_pct_raw not in ("", "-", "--", "—") else None
-                volume      = _td(5)
+        vol, q, last = best
+        ref = _num(q.get("CRefPrice"))
+        night_chg     = round(last - ref, 2)               if ref else None
+        night_chg_pct = round((last - ref) / ref * 100, 3) if ref else None
 
-                if night_close is None:
-                    raise ValueError("night_close is None — market may be closed or page structure changed")
-
-                logger.success(f"[get_tw_night_futures] close={night_close} chg_pct={night_chg_pct}%")
-                return {
-                    "product":       "臺股期貨 (TXF)",
-                    "night_close":   night_close,
-                    "night_chg":     night_chg,
-                    "night_chg_pct": night_chg_pct,
-                    "volume":        volume,
-                    "as_of":         datetime.now(timezone.utc).isoformat(),
-                    "source":        "TAIFEX afterHoursPrice",
-                }
-        raise ValueError("臺股期貨 row not found — holiday, pre-session, or page structure changed")
+        logger.success(f"[get_tw_night_futures] close={last} chg_pct={night_chg_pct}%")
+        return {
+            "product":       f"臺股期貨 {q.get('DispCName')} (TXF)",
+            "night_close":   int(last),
+            "night_chg":     night_chg,
+            "night_chg_pct": night_chg_pct,
+            "volume":        int(vol),
+            "as_of":         datetime.now(timezone.utc).isoformat(),
+            "source":        "TAIFEX MIS getQuoteList (MarketType=1)",
+        }
 
     try:
         return await _aretry(_fetch)
     except Exception as exc:
         logger.warning(f"[get_tw_night_futures] Failed: {exc}")
-        return {"error": True, "message": str(exc), "source": "TAIFEX afterHoursPrice"}
+        return {"error": True, "message": str(exc), "source": "TAIFEX MIS"}
 
 
 if __name__ == "__main__":
