@@ -72,13 +72,17 @@ def _load_agent_outputs(run_id_ref: Optional[str], trade_date: date) -> dict:
                         SELECT agent_name, raw_response
                         FROM llm_traces
                         WHERE run_id = :rid
-                        ORDER BY created_at ASC
+                        ORDER BY id ASC
                     """),
                     {"rid": run_id_ref},
                 ).fetchall()
+            # Shadow mode logs extra traces under the same agent_name. The
+            # primary (production) trace is written first, so keep the first
+            # non-empty trace per agent and ignore later shadow ReAct traces —
+            # the evaluation grades production output, not the shadow.
             for row in rows:
                 name = row[0]
-                if name in outputs and row[1]:
+                if name in outputs and row[1] and not outputs[name]:
                     outputs[name] = str(row[1])
             logger.debug(f"[eval] Loaded {len(rows)} llm_trace rows for run_id={run_id_ref}")
         except Exception as exc:
