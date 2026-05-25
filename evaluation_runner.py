@@ -102,17 +102,33 @@ def _load_agent_outputs(run_id_ref: Optional[str], trade_date: date) -> dict:
 
 
 def _build_raw_market_data(episode: Optional[dict]) -> dict:
-    """Reconstruct raw_market_data dict from session_episodes row."""
+    """Reconstruct raw_market_data dict from session_episodes row.
+
+    Numeric columns come back as int (oi_net) or decimal.Decimal (pct
+    columns are DECIMAL(6,3)). eval_data_collector checks
+    isinstance(v, (int, float)) which rejects Decimal, so we normalize
+    every numeric to a plain float here."""
     if not episode:
         return {}
+
+    def _f(v):
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return v
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
     return {
-        "foreign_oi_net":   episode.get("foreign_oi_net"),
-        "trust_oi_net":     episode.get("trust_oi_net"),
-        "dealer_oi_net":    episode.get("dealer_oi_net"),
-        "djia_chg_pct":     episode.get("djia_chg_pct"),
-        "ndx_chg_pct":      episode.get("ndx_chg_pct"),
-        "sox_chg_pct":      episode.get("sox_chg_pct"),
-        "tsm_adr_chg_pct":  episode.get("tsm_adr_chg_pct"),
+        "foreign_oi_net":   _f(episode.get("foreign_oi_net")),
+        "trust_oi_net":     _f(episode.get("trust_oi_net")),
+        "dealer_oi_net":    _f(episode.get("dealer_oi_net")),
+        "djia_chg_pct":     _f(episode.get("djia_chg_pct")),
+        "ndx_chg_pct":      _f(episode.get("ndx_chg_pct")),
+        "sox_chg_pct":      _f(episode.get("sox_chg_pct")),
+        "tsm_adr_chg_pct":  _f(episode.get("tsm_adr_chg_pct")),
         "data_ok":          True,  # episode row exists → data_collector ran
     }
 
