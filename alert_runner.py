@@ -256,6 +256,16 @@ def send_weekly_digest() -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _is_trading_day(d: date) -> bool:
+    """Trading day = weekday Mon-Fri. Taiwan stock-market holidays (春節 /
+    清明 / 端午 / 中秋 / 國慶 etc.) are not yet enumerated — extend here
+    when a calendar source is wired in. Daily A-001/A-002/A-003 checks
+    should only fire on trading days; the weekly cron lands on Sunday
+    and used to false-fire A-001 because no workflow_run exists for the
+    weekend."""
+    return d.weekday() < 5
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI Agent Studio Alert Runner")
     parser.add_argument("--weekly", action="store_true",
@@ -270,11 +280,14 @@ def main() -> None:
     from database_tools import ensure_observability_tables
     ensure_observability_tables()
 
-    ok_001 = check_a001(check_date)
-    if ok_001:
-        check_a002(check_date)
-        check_a003(check_date)
-        check_a007(check_date)
+    if _is_trading_day(check_date):
+        ok_001 = check_a001(check_date)
+        if ok_001:
+            check_a002(check_date)
+            check_a003(check_date)
+            check_a007(check_date)
+    else:
+        logger.info(f"[AlertRunner] {check_date} is non-trading (weekday={check_date.weekday()}) — skip daily checks")
 
     if args.weekly:
         logger.info("[AlertRunner] Running weekly checks")
