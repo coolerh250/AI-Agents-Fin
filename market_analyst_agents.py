@@ -546,11 +546,20 @@ def _build_portfolio_user_msg(state: WorkflowState) -> tuple[str, list[dict]]:
 
 
 def _portfolio_primary(state: WorkflowState,
-                       user_content: str) -> tuple[str, int, float]:
-    """Original portfolio_manager LLM body. Returns (advice_text, latency_ms, cost_usd)."""
+                       user_content: str,
+                       n_holdings: int = 1) -> tuple[str, int, float]:
+    """portfolio_manager LLM body. Returns (advice_text, latency_ms, cost_usd).
+
+    max_tokens scales with holdings — the previous hardcoded 1024 truncated
+    at ~3 stocks (2026-05-27: 7 holdings, only 3 made it into the report).
+    Formula min(4096, 320*n + 600): per-stock budget 320 tokens (empirical
+    average from completed traces), 600-token buffer for the intro/summary,
+    4096 cap to bound cost when portfolio grows large."""
     run_id = state.get("run_id")
+    max_tok = min(4096, 320 * max(n_holdings, 1) + 600)
+    logger.debug(f"[PortfolioManager] max_tokens={max_tok} for n_holdings={n_holdings}")
     start = time.monotonic()
-    response = _llm(_MODEL_SONNET, max_tokens=1024).invoke([
+    response = _llm(_MODEL_SONNET, max_tokens=max_tok).invoke([
         SystemMessage(content=_PORTFOLIO_SYSTEM),
         HumanMessage(content=user_content),
     ])
@@ -627,7 +636,7 @@ def portfolio_manager_node(state: WorkflowState) -> dict:
         return {"portfolio_advice": ""}
 
     primary_text, primary_latency, primary_cost = _portfolio_primary(
-        state, user_content
+        state, user_content, n_holdings=len(enriched)
     )
     logger.success("[PortfolioManager] 持股診斷完成")
 
