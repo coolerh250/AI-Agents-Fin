@@ -280,6 +280,18 @@ def ensure_portfolio_table() -> None:
                 "ADD UNIQUE KEY uq_user_stock (line_user_id, stock_id)",
                 "add uq_user_stock",
             ),
+            (
+                # Phase 3 §3: per-stock analysis toggle, used by dashboard
+                # checkbox UI and portfolio_manager filter (10-stock cap).
+                "ALTER TABLE user_portfolio "
+                "ADD COLUMN analyze_flag TINYINT(1) NOT NULL DEFAULT 1",
+                "add analyze_flag",
+            ),
+            (
+                "ALTER TABLE user_portfolio "
+                "ADD INDEX idx_up_analyze (line_user_id, analyze_flag)",
+                "add idx_up_analyze",
+            ),
         ]:
             try:
                 conn.execute(text(stmt))
@@ -567,6 +579,10 @@ def ensure_observability_tables() -> None:
     ensure_agent_strategy_profiles_table()  # Phase 1: strategy-as-data
     ensure_shadow_runs_table()          # Phase 1: shadow rollout comparison
     ensure_optimizer_proposals_table()  # Phase 2: optimizer proposal ledger
+    ensure_stock_sentiment_daily_table()        # Phase 3: §2 raw sentiment
+    ensure_section2_picks_table()               # Phase 3: §2 weekly picks
+    ensure_backtest_indicator_winrate_table()   # Phase 3: per-stock indicator winrate
+    ensure_ohlcv_daily_cache_table()            # Phase 3: yfinance cache
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1972,6 +1988,113 @@ def ensure_optimizer_proposals_table() -> None:
             """))
     except Exception as exc:
         logger.warning(f"[migration] ensure_optimizer_proposals_table failed: {exc}")
+
+
+# ── Phase 3: Section 2 (sentiment-driven stock picks) ─────────────────────────
+
+def ensure_stock_sentiment_daily_table() -> None:
+    """Daily per-stock sentiment raw counts from CNYES / TWSE / PTT. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS stock_sentiment_daily (
+                    id               BIGINT       AUTO_INCREMENT PRIMARY KEY,
+                    trade_date       DATE         NOT NULL,
+                    stock_id         VARCHAR(20)  NOT NULL,
+                    source           VARCHAR(20)  NOT NULL,
+                    raw_count        INT          NOT NULL DEFAULT 0,
+                    normalized_score DECIMAL(6,4) NULL,
+                    sample_meta      JSON         NULL,
+                    created_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_ssd_date_stock_src (trade_date, stock_id, source),
+                    INDEX idx_ssd_date  (trade_date),
+                    INDEX idx_ssd_stock (stock_id)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_stock_sentiment_daily_table failed: {exc}")
+
+
+def ensure_section2_picks_table() -> None:
+    """Weekly 3-stock picks (top 3 of top 10 by composite sentiment, filtered
+    by technical signal score + chief_strategist direction match). Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS section2_picks (
+                    id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    trade_week       DATE          NOT NULL,
+                    rank_in_week     TINYINT       NOT NULL,
+                    stock_id         VARCHAR(20)   NOT NULL,
+                    stock_name       VARCHAR(80)   NULL,
+                    composite_score  DECIMAL(6,4)  NOT NULL,
+                    signal_score     TINYINT       NOT NULL,
+                    signals_json     JSON          NULL,
+                    direction_match  VARCHAR(10)   NULL,
+                    entry_band_low   DECIMAL(10,2) NULL,
+                    entry_band_high  DECIMAL(10,2) NULL,
+                    stop_loss        DECIMAL(10,2) NULL,
+                    target_price     DECIMAL(10,2) NULL,
+                    selection_reason VARCHAR(200)  NULL,
+                    narrative_text   TEXT          NULL,
+                    created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_s2p_week_rank (trade_week, rank_in_week),
+                    INDEX idx_s2p_week  (trade_week),
+                    INDEX idx_s2p_stock (stock_id)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_section2_picks_table failed: {exc}")
+
+
+def ensure_backtest_indicator_winrate_table() -> None:
+    """Per-stock × indicator backtest winrate over a rolling period. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS backtest_indicator_winrate (
+                    id              BIGINT       AUTO_INCREMENT PRIMARY KEY,
+                    stock_id        VARCHAR(20)  NOT NULL,
+                    indicator_name  VARCHAR(40)  NOT NULL,
+                    backtest_period VARCHAR(20)  NOT NULL,
+                    as_of_date      DATE         NOT NULL,
+                    sample_count    INT          NOT NULL,
+                    winrate_pct     DECIMAL(5,2) NOT NULL,
+                    median_fwd_ret  DECIMAL(7,3) NULL,
+                    mean_fwd_ret    DECIMAL(7,3) NULL,
+                    stddev_fwd_ret  DECIMAL(7,3) NULL,
+                    created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_biw_stock_ind_date (stock_id, indicator_name, as_of_date),
+                    INDEX idx_biw_stock (stock_id),
+                    INDEX idx_biw_indic (indicator_name)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_backtest_indicator_winrate_table failed: {exc}")
+
+
+def ensure_ohlcv_daily_cache_table() -> None:
+    """yfinance OHLCV cache to avoid re-fetching on backtest reruns. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ohlcv_daily_cache (
+                    id          BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    stock_id    VARCHAR(20)   NOT NULL,
+                    trade_date  DATE          NOT NULL,
+                    open_px     DECIMAL(10,2) NULL,
+                    high_px     DECIMAL(10,2) NULL,
+                    low_px      DECIMAL(10,2) NULL,
+                    close_px    DECIMAL(10,2) NULL,
+                    volume      BIGINT        NULL,
+                    source      VARCHAR(20)   NOT NULL DEFAULT 'yfinance',
+                    fetched_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_ohlcv_stock_date (stock_id, trade_date),
+                    INDEX idx_ohlcv_date (trade_date)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_ohlcv_daily_cache_table failed: {exc}")
 
 
 def get_promoted_within_days(days: int = 7) -> list[dict]:

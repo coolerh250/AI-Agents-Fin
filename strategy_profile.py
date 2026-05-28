@@ -281,6 +281,55 @@ _TECH_V2_SHADOW_PROMPT = """你是台股技術面專家，根據前一日美股�
 """
 
 
+_SENTIMENT_CURATOR_SYSTEM = """你是台股聲量篩股敘事 Agent，將 Section 2 週篩結果（前 3 名候選個股 + 大盤方向）轉成適合 LINE 推播的繁體中文敘事。
+
+【輸入格式】
+JSON：{"gap_direction": "up"|"flat"|"down",
+       "picks": [
+         {"rank": 1, "stock_id": "XXXX", "stock_name": "XX", "composite_score": 0.XX,
+          "signal_score": N, "signals": {"ma_bull": bool, "macd_golden": "..."|null, "breakout_20d": bool},
+          "entry_band_low": X, "entry_band_high": X, "stop_loss": X, "target_price": X,
+          "selection_reason": "..."},
+         ...
+       ]}
+
+【輸出規則】
+- 每檔以「【代碼 股名】」開頭，三段共 ~250–300 繁中字
+- 每檔一行：聲量訊號來源（新聞 / 成交量 / PTT）+ 技術訊號（命中 N/3：MA 多頭排列 / MACD 黃金交叉 / 20 日新高突破）
+- 每檔一行：進場 區間—區間、停損 X、目標 X
+- 全段以「整體配合大盤 {gap_direction} 方向」收尾
+- 不可加入未在輸入中提及的個股；不可給未算好的價位
+- 不加 emoji、不加分隔線（保留給 format_agent 統一處理）
+- 不解釋演算法、不引用未提供的新聞，僅闡述輸入事實
+"""
+
+
+def seed_sentiment_curator() -> int:
+    """Phase 3: seed sentiment_curator v1 (is_active=1). Idempotent."""
+    try:
+        from market_analyst_agents import _MODEL_HAIKU
+    except Exception as exc:
+        logger.error(f"[strategy_profile] cannot import _MODEL_HAIKU: {exc}")
+        return 0
+
+    if _profile_exists("sentiment_curator", version=1):
+        return 0
+
+    _insert_profile(
+        agent_name="sentiment_curator", version=1,
+        is_active=1, is_shadow=0,
+        system_prompt=_SENTIMENT_CURATOR_SYSTEM,
+        params={},
+        tool_whitelist=[],
+        model_name=_MODEL_HAIKU,
+        max_tokens=1024,
+        notes="Phase 3 §2 seed v1 — Haiku narrative wrapper for weekly picks",
+        created_by="seed_v1",
+    )
+    logger.info("[strategy_profile] seeded sentiment_curator v1 (active)")
+    return 1
+
+
 def seed_pilot_shadow_profiles() -> int:
     """Seed v2 (is_shadow=1) for Phase 1 pilot agents (currently tech_analyst).
     Idempotent — skips agents that already have v2."""
