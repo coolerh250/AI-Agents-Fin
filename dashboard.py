@@ -13,6 +13,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Per-run cost threshold for the cost-overrun warnings below. Originally $0.15
+# under Phase 1 (1024-tok portfolio_manager truncation). After the 2026-05-27
+# dynamic-max_tokens fix, full 7-stock portfolio output legitimately costs
+# ~$0.045 (was $0.021), pushing typical daily totals to ~$0.16-0.17. The cap
+# was raised to $0.20 on 2026-06-01 to absorb the intended fix and the
+# upcoming Phase 3 §3 10-stock analyze_flag headroom (worst case ~$0.19).
+_DAILY_COST_CAP_USD = 0.20
+
 from database_tools import (
     add_portfolio_item,
     delete_portfolio_item,
@@ -274,9 +282,9 @@ with tab_cost:
             run_df = pd.DataFrame(run_rows)
             run_df["total_cost_usd"] = run_df["total_cost_usd"].astype(float)
             run_df["trade_date"]     = pd.to_datetime(run_df["trade_date"]).dt.date
-            over_threshold = run_df["total_cost_usd"] > 0.15
+            over_threshold = run_df["total_cost_usd"] > _DAILY_COST_CAP_USD
             if over_threshold.any():
-                st.warning(f"⚠️ {over_threshold.sum()} 次執行成本超過 $0.15 閾值")
+                st.warning(f"⚠️ {over_threshold.sum()} 次執行成本超過 ${_DAILY_COST_CAP_USD:.2f} 閾值")
             st.dataframe(
                 run_df[["trade_date", "status", "total_cost_usd",
                         "opus_thinking_tokens", "snapshot_age_seconds",
@@ -465,13 +473,13 @@ with tab_health:
 
         success_rate = runs_df["status"].eq("success").mean() * 100
         avg_cost     = runs_df["total_cost_usd"].mean()
-        over_thresh  = runs_df["total_cost_usd"].gt(0.15).sum()
+        over_thresh  = runs_df["total_cost_usd"].gt(_DAILY_COST_CAP_USD).sum()
 
         h1, h2, h3, h4 = st.columns(4)
         h1.metric("執行次數（30 天）", len(runs_df))
         h2.metric("成功率", f"{success_rate:.1f}%")
         h3.metric("平均成本 / run", f"${avg_cost:.4f}")
-        h4.metric("超出閾值次數", over_thresh, help="單次成本 > $0.15")
+        h4.metric("超出閾值次數", over_thresh, help=f"單次成本 > ${_DAILY_COST_CAP_USD:.2f}")
 
         st.subheader("工作流執行紀錄")
         st.dataframe(
