@@ -311,21 +311,55 @@ def _build_tech_user_msg(state: WorkflowState) -> str:
 
 def _tech_analyst_primary(state: WorkflowState,
                           user_content: str) -> tuple[str, int, float]:
-    """Original tech_analyst logic. Returns (tech_report_text, latency_ms, cost_usd)."""
+    """Run the active tech_analyst profile.
+
+    Phase 1.5 — primary now reads `load_active_profile` (was hardcoded
+    `_TECH_SYSTEM`). If the active profile has a non-empty tool_whitelist
+    it dispatches to `run_agent_loop` (same ReAct loop the shadow uses);
+    otherwise it does the original single-shot invoke. This is what makes
+    `promote_profile.py promote tech_analyst <v>` actually change
+    production behavior — without it, the strategy-as-data table is a
+    documentation surface only."""
+    from strategy_profile import load_profile_or_fallback
     run_id = state.get("run_id")
+
+    profile = load_profile_or_fallback(
+        "tech_analyst",
+        fallback_prompt=_TECH_SYSTEM,
+        fallback_params={},
+        fallback_tools=[],
+        fallback_model=_MODEL_SONNET,
+        fallback_max_tokens=1024,
+        run_id=run_id,
+    )
+
+    if profile.tool_whitelist:
+        from agent_runtime import run_agent_loop
+        start = time.monotonic()
+        result = run_agent_loop(
+            agent_name="tech_analyst",
+            run_id=run_id,
+            profile=profile,
+            user_message=user_content,
+        )
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return result["final_text"], latency_ms, float(result.get("cost_usd") or 0.0)
+
+    # Single-shot path (v1-style, tool_whitelist empty).
     start = time.monotonic()
-    response = _llm(_MODEL_SONNET).invoke([
-        SystemMessage(content=_TECH_SYSTEM),
+    response = _llm(profile.model_name, max_tokens=profile.max_tokens).invoke([
+        SystemMessage(content=profile.system_prompt),
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("tech_analyst", _MODEL_SONNET, response, latency_ms,
-                  run_id=run_id, system_prompt=_TECH_SYSTEM, user_content=user_content)
+    _record_usage("tech_analyst", profile.model_name, response, latency_ms,
+                  run_id=run_id, system_prompt=profile.system_prompt,
+                  user_content=user_content)
 
     usage = getattr(response, "usage_metadata", None) or {}
     in_tok  = int(usage.get("input_tokens",  0) or 0)
     out_tok = int(usage.get("output_tokens", 0) or 0)
-    p = _PRICING.get(_MODEL_SONNET, {"input": 0.0, "output": 0.0})
+    p = _PRICING.get(profile.model_name, {"input": 0.0, "output": 0.0})
     cost_usd = (in_tok * p["input"] + out_tok * p["output"]) / 1_000_000
 
     return _extract_text(response), latency_ms, cost_usd
@@ -548,29 +582,56 @@ def _build_portfolio_user_msg(state: WorkflowState) -> tuple[str, list[dict]]:
 def _portfolio_primary(state: WorkflowState,
                        user_content: str,
                        n_holdings: int = 1) -> tuple[str, int, float]:
-    """portfolio_manager LLM body. Returns (advice_text, latency_ms, cost_usd).
+    """Run the active portfolio_manager profile.
 
-    max_tokens scales with holdings — the previous hardcoded 1024 truncated
-    at ~3 stocks (2026-05-27: 7 holdings, only 3 made it into the report).
-    Formula min(4096, 320*n + 600): per-stock budget 320 tokens (empirical
-    average from completed traces), 600-token buffer for the intro/summary,
-    4096 cap to bound cost when portfolio grows large."""
+    Phase 1.5 — primary now honors `load_active_profile`. If the active
+    profile has tools, dispatch to `run_agent_loop` (same ReAct path as
+    shadow); otherwise single-shot invoke. The single-shot path keeps the
+    dynamic per-holdings max_tokens (min(4096, 320*n + 600)) that the
+    2026-05-27 fix introduced — profile.max_tokens is treated as a floor
+    for the ReAct path only."""
+    from strategy_profile import load_profile_or_fallback
     run_id = state.get("run_id")
+
+    profile = load_profile_or_fallback(
+        "portfolio_manager",
+        fallback_prompt=_PORTFOLIO_SYSTEM,
+        fallback_params={},
+        fallback_tools=[],
+        fallback_model=_MODEL_SONNET,
+        fallback_max_tokens=3072,
+        run_id=run_id,
+    )
+
+    if profile.tool_whitelist:
+        from agent_runtime import run_agent_loop
+        start = time.monotonic()
+        result = run_agent_loop(
+            agent_name="portfolio_manager",
+            run_id=run_id,
+            profile=profile,
+            user_message=user_content,
+        )
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return result["final_text"], latency_ms, float(result.get("cost_usd") or 0.0)
+
+    # Single-shot path: per-holdings dynamic cap.
     max_tok = min(4096, 320 * max(n_holdings, 1) + 600)
     logger.debug(f"[PortfolioManager] max_tokens={max_tok} for n_holdings={n_holdings}")
     start = time.monotonic()
-    response = _llm(_MODEL_SONNET, max_tokens=max_tok).invoke([
-        SystemMessage(content=_PORTFOLIO_SYSTEM),
+    response = _llm(profile.model_name, max_tokens=max_tok).invoke([
+        SystemMessage(content=profile.system_prompt),
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
-    _record_usage("portfolio_manager", _MODEL_SONNET, response, latency_ms,
-                  run_id=run_id, system_prompt=_PORTFOLIO_SYSTEM, user_content=user_content)
+    _record_usage("portfolio_manager", profile.model_name, response, latency_ms,
+                  run_id=run_id, system_prompt=profile.system_prompt,
+                  user_content=user_content)
 
     usage = getattr(response, "usage_metadata", None) or {}
     in_tok  = int(usage.get("input_tokens",  0) or 0)
     out_tok = int(usage.get("output_tokens", 0) or 0)
-    p = _PRICING.get(_MODEL_SONNET, {"input": 0.0, "output": 0.0})
+    p = _PRICING.get(profile.model_name, {"input": 0.0, "output": 0.0})
     cost_usd = (in_tok * p["input"] + out_tok * p["output"]) / 1_000_000
     return _extract_text(response), latency_ms, cost_usd
 
