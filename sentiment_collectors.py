@@ -21,6 +21,7 @@ import time
 import urllib.parse
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -252,6 +253,27 @@ def _parse_ptt_page(html: str):
     return posts, prev_url
 
 
+def _ptt_get_with_retry(client: httpx.Client, url: str,
+                        attempts: int = 3) -> httpx.Response:
+    """PTT's WAF intermittently TCP-resets new TLS handshakes (verified
+    2026-06-03: 1 of 3 fresh attempts gets [Errno 104] Connection reset
+    by peer). Retry with 2s/4s backoff before giving up so the cron job
+    doesn't drop a whole day's data over a transient reset."""
+    last_exc: Optional[Exception] = None
+    for n in range(attempts):
+        try:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code} on {url}")
+            return resp
+        except (httpx.ConnectError, httpx.RemoteProtocolError, RuntimeError) as exc:
+            last_exc = exc
+            if n < attempts - 1:
+                time.sleep(2.0 * (n + 1))
+    assert last_exc is not None
+    raise last_exc
+
+
 def collect_ptt_stock_buzz(pages: int = 3) -> dict[str, int]:
     """Scrape PTT 股板 N back-pages. Returns {stock_id: combined_score} where
     combined = mentions + max(push_total, 0) * 0.2  (push weighted 20%).
@@ -265,9 +287,7 @@ def collect_ptt_stock_buzz(pages: int = 3) -> dict[str, int]:
                           cookies={"over18": "1"},
                           follow_redirects=True) as client:
             for page_n in range(pages):
-                resp = client.get(url)
-                if resp.status_code != 200:
-                    raise RuntimeError(f"HTTP {resp.status_code} on {url}")
+                resp = _ptt_get_with_retry(client, url)
                 posts, prev = _parse_ptt_page(resp.text)
                 posts_all.extend(posts)
                 if not prev:
