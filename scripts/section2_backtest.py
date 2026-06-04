@@ -87,16 +87,17 @@ def _write_cache(stock_id: str, df: pd.DataFrame) -> None:
             "v":  int(row.get("Volume",  0) or 0),
         })
     with _engine().begin() as conn:
-        # TiDB compatible UPSERT — ON DUPLICATE KEY UPDATE refreshes prices on
-        # re-fetch (e.g. yfinance adjusts splits). uq_ohlcv_stock_date enforces
-        # the natural key.
+        # TiDB compatible UPSERT — using VALUES(col) so executemany params bind
+        # only once. ON DUPLICATE refreshes prices on re-fetch (e.g. yfinance
+        # split adjustment). uq_ohlcv_stock_date enforces the natural key.
         conn.execute(text("""
             INSERT INTO ohlcv_daily_cache
               (stock_id, trade_date, open_px, high_px, low_px, close_px, volume)
             VALUES (:sid, :d, :o, :h, :l, :c, :v)
             ON DUPLICATE KEY UPDATE
-              open_px=:o, high_px=:h, low_px=:l, close_px=:c, volume=:v,
-              fetched_at=CURRENT_TIMESTAMP
+              open_px=VALUES(open_px), high_px=VALUES(high_px),
+              low_px=VALUES(low_px),   close_px=VALUES(close_px),
+              volume=VALUES(volume),   fetched_at=CURRENT_TIMESTAMP
         """), payload)
 
 
