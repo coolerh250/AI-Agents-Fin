@@ -235,10 +235,20 @@ def run_weekly(dry_run: bool = False, top_n: int = 10) -> int:
         print()
 
     if dry_run:
-        logger.info("[section2] --dry-run — skip UPSERT")
+        logger.info("[section2] --dry-run — skip UPSERT + curator")
         return 0
     n = _upsert_picks(week_start, final)
     logger.success(f"[section2] persisted {n} picks for week {week_start}")
+
+    # Day 6: invoke sentiment_curator to fill narrative_text on rank=1 row.
+    # Failure is non-fatal — Day 7's loader has a deterministic fallback.
+    try:
+        from sentiment_curator_agent import run_curator
+        rc = run_curator(week_start)
+        if rc != 0:
+            logger.warning("[section2] curator returned non-zero — narrative blank")
+    except Exception as exc:
+        logger.warning(f"[section2] curator failed (suppressed): {exc}")
     return 0
 
 
