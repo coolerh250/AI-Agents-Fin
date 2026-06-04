@@ -2,7 +2,7 @@
 # Reference mirror of `crontab -l` on the production host (ai-agents-test).
 # Edit on host with `crontab -e`; this file is a manual snapshot, NOT auto-applied.
 # Restore: `crontab crontab.txt` on the host (overwrites).
-# Last synced: 2026-05-28
+# Last synced: 2026-06-04
 #
 # System timezone is UTC. Schedule fields below are UTC.
 # Taipei (UTC+8, no DST) equivalents are noted in each comment.
@@ -22,3 +22,7 @@
 0 18 * * * cd /home/itadmin/ai_agent_studio && /home/itadmin/.local/bin/uv run python scripts/optimizer_revert_check.py >> /home/itadmin/ai_agent_studio/logs/optimizer.log 2>&1
 # Phase 3 §2 sentiment collectors — 15:30 Taipei = 07:30 UTC, Mon-Fri (post-close + buffer)
 30 7 * * 1-5 cd /home/itadmin/ai_agent_studio && /home/itadmin/.local/bin/uv run python sentiment_collectors.py --source all >> /home/itadmin/ai_agent_studio/logs/sentiment.log 2>&1
+# Phase 3 §2 weekly screen + Haiku narrative — Sun 03:30 Taipei = Sat 19:30 UTC (offset +30 min vs optimizer)
+30 19 * * 6 cd /home/itadmin/ai_agent_studio && /home/itadmin/.local/bin/uv run python scripts/section2_weekly.py >> /home/itadmin/ai_agent_studio/logs/section2.log 2>&1
+# Phase 3 §2 indicator backtest (50 stocks, observe-only) — Sun 03:45 Taipei = Sat 19:45 UTC (after weekly; OHLCV cache warms)
+45 19 * * 6 cd /home/itadmin/ai_agent_studio && /home/itadmin/.local/bin/uv run python scripts/section2_backtest.py --top-n 50 >> /home/itadmin/ai_agent_studio/logs/section2.log 2>&1
