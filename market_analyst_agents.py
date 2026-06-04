@@ -6,7 +6,7 @@ Model routing: Haiku (collector/format) · Sonnet (analysts) · Opus+Thinking (s
 import json
 import os
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional, TypedDict
 
 import anthropic as _anthropic
@@ -47,6 +47,7 @@ class WorkflowState(TypedDict):
     final_report:     str             # LINE-formatted output from format_agent
     db_row_id:        Optional[int]
     portfolio_advice: str
+    section2_text:    str             # Phase 3 §2 — written by section2_loader_node
 
 
 # ── System prompts ────────────────────────────────────────────────────────────
@@ -147,8 +148,30 @@ _FORMAT_SYSTEM = """你是 LINE 推播格式化 Agent。
 - 每個段落前加上合適的 emoji（📊 盤勢、⚔️ 策略、🛡️ 防守、⚠️ 風險）
 - 保留原文核心內容，去除冗餘文字
 - 直接輸出格式化後的訊息，不加任何說明
-- 若使用者持股診斷內容不為空，請在訊息末尾加入【個人持股診斷】段落（emoji: 💼），並原文放入診斷內容
+- 若使用者持股診斷內容不為空,請在訊息末尾加入【個人持股診斷】段落(emoji: 💼)，並原文放入診斷內容
 - 若持股診斷內容為空，略過【個人持股診斷】段落"""
+
+# Phase 3 §2 — three-section format used when SECTION2_ENABLED=true.
+# Keep _FORMAT_SYSTEM (above) intact for instant rollback path.
+_FORMAT_SYSTEM_V2 = """你是 LINE 推播格式化 Agent。
+將輸入內容重新排版為適合手機閱讀的三段式 LINE 訊息，依以下固定順序輸出：
+
+📊【大盤趨勢分析與方向預測】
+（內容來自「原始建議書」，保留盤勢定調 + 操作策略 + 關鍵防守點 + 風險提示；
+段內可繼續使用 ⚔️ 策略、🛡️ 防守、⚠️ 風險 等子 emoji）
+━━━━━━━━━━
+🔍【台股網路聲量篩股】
+（內容來自「本週聲量篩股」原文，必須**完整保留、原樣輸出、不增不減**）
+━━━━━━━━━━
+💼【個人持股分析】
+（內容來自「使用者持股診斷」原文，每檔保持原始格式）
+
+嚴格規則：
+- 總長度不超過 2000 字
+- §2 永不壓縮、永不改寫；若輸入「本週聲量篩股」為「本週篩股尚未產出」則原樣顯示該句
+- §3 若「使用者持股診斷」為空字串，整段（含標題與分隔線）一併省略
+- 超過字數時優先壓 §1（保留盤勢定調與操作策略），其次壓 §3（保留前 3 檔個股），§2 不動
+- 直接輸出最終訊息，不加任何說明、不加 code block"""
 
 
 # ── LLM factories ─────────────────────────────────────────────────────────────
@@ -770,27 +793,107 @@ def generate_portfolio_analysis_for_user(
     return result
 
 
+# ── Node: Section2Loader (no LLM) — Phase 3 §2 ────────────────────────────────
+
+def _current_week_monday(d: date) -> date:
+    """Monday of the current trading week (most-recent Mon on-or-before d).
+
+    Daily workflow runs Mon-Fri; section2_weekly cron writes picks under the
+    upcoming Monday's trade_week on Saturday UTC → so Mon-Fri all see the same
+    week's Monday. Sunday (if anyone runs by hand) reads the previous week's."""
+    return d - timedelta(days=d.weekday())
+
+
+def _load_current_section2() -> str:
+    """Read latest section2_picks for this week and return the LINE-ready body.
+
+    Resolution order:
+      1. curator narrative on rank_in_week=1 (Haiku, ~300 字 三檔合一)
+      2. deterministic fallback formatted from picks columns
+      3. cold-start placeholder if no picks for this week"""
+    from sqlalchemy import text
+    from database_tools import _engine
+
+    week_start = _current_week_monday(date.today())
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT rank_in_week, stock_id, stock_name, signal_score,
+                       entry_band_low, entry_band_high, stop_loss, target_price,
+                       selection_reason, narrative_text
+                FROM section2_picks
+                WHERE trade_week = :w
+                ORDER BY rank_in_week
+            """),
+            {"w": week_start},
+        ).fetchall()
+
+    if not rows:
+        return "本週篩股尚未產出"
+
+    narrative = rows[0][9]
+    if narrative and str(narrative).strip():
+        return str(narrative).strip()
+
+    # Deterministic fallback when curator narrative is missing/blank
+    lines: list[str] = []
+    for r in rows:
+        _rank, sid, sname, sscore, ebl, ebh, sl, tp, reason, _ = r
+        lines.append(f"【{sid} {sname or ''}】訊號 {sscore}/3")
+        lines.append(f"  進場 {ebl}~{ebh}　停損 {sl}　目標 {tp}")
+        if reason:
+            lines.append(f"  理由：{reason}")
+    return "\n".join(lines)
+
+
+def section2_loader_node(state: WorkflowState) -> dict:
+    """Read this week's §2 picks into state. No LLM, no network."""
+    from telemetry import emit_event
+    run_id = state.get("run_id")
+    logger.info("[Section2Loader] 讀取本週聲量篩股結果")
+    try:
+        body = _load_current_section2()
+    except Exception as exc:
+        logger.warning(f"[Section2Loader] load failed (non-fatal): {exc}")
+        emit_event(run_id, "fallback_activated", "section2_loader",
+                   {"reason": f"load_failed: {exc}"}, severity="warn")
+        body = "本週篩股尚未產出"
+    logger.success(f"[Section2Loader] section2_text {len(body)} chars")
+    return {"section2_text": body}
+
+
 # ── Node: FormatAgent (Haiku) ─────────────────────────────────────────────────
 
 def format_agent_node(state: WorkflowState) -> dict:
     run_id = state.get("run_id")
     logger.info("[FormatAgent] 格式化為 LINE 推播格式")
     portfolio_section = state.get("portfolio_advice", "")
-    user_content = f"原始建議書：\n{state['final_brief']}"
-    if portfolio_section:
-        user_content += f"\n\n使用者持股診斷：\n{portfolio_section}"
+    section2_section  = state.get("section2_text", "")
+    section2_enabled  = os.getenv("SECTION2_ENABLED", "false").lower() == "true"
+
+    if section2_enabled:
+        system_prompt = _FORMAT_SYSTEM_V2
+        user_content  = f"原始建議書：\n{state['final_brief']}"
+        user_content += f"\n\n本週聲量篩股：\n{section2_section or '本週篩股尚未產出'}"
+        if portfolio_section:
+            user_content += f"\n\n使用者持股診斷：\n{portfolio_section}"
+    else:
+        system_prompt = _FORMAT_SYSTEM
+        user_content  = f"原始建議書：\n{state['final_brief']}"
+        if portfolio_section:
+            user_content += f"\n\n使用者持股診斷：\n{portfolio_section}"
 
     start = time.monotonic()
     response = _llm(_MODEL_HAIKU, max_tokens=2048).invoke([
-        SystemMessage(content=_FORMAT_SYSTEM),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=user_content),
     ])
     latency_ms = int((time.monotonic() - start) * 1000)
     _record_usage("format_agent", _MODEL_HAIKU, response, latency_ms,
-                  run_id=run_id, system_prompt=_FORMAT_SYSTEM, user_content=user_content)
+                  run_id=run_id, system_prompt=system_prompt, user_content=user_content)
 
     result = _extract_text(response)
-    logger.success("[FormatAgent] LINE 格式化完成")
+    logger.success(f"[FormatAgent] LINE 格式化完成 (section2_enabled={section2_enabled})")
     return {"final_report": result}
 
 

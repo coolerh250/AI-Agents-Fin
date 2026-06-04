@@ -29,6 +29,7 @@ from market_analyst_agents import (
     format_agent_node,
     portfolio_manager_node,
     save_to_db_node,
+    section2_loader_node,
     send_notification_node,
     tech_analyst_node,
     _MODEL_HAIKU,
@@ -58,6 +59,7 @@ def build_graph():
     graph.add_node("tech_analyst",      tech_analyst_node)
     graph.add_node("chief_strategist",  chief_strategist_node)
     graph.add_node("portfolio_manager", portfolio_manager_node)
+    graph.add_node("section2_loader",   section2_loader_node)
     graph.add_node("format_agent",      format_agent_node)
     graph.add_node("save_to_db",        save_to_db_node)
     graph.add_node("send_notification", send_notification_node)
@@ -68,7 +70,8 @@ def build_graph():
     graph.add_edge("chip_analyst",         "chief_strategist")
     graph.add_edge("tech_analyst",         "chief_strategist")
     graph.add_edge("chief_strategist",     "portfolio_manager")
-    graph.add_edge("portfolio_manager",    "format_agent")
+    graph.add_edge("portfolio_manager",    "section2_loader")
+    graph.add_edge("section2_loader",      "format_agent")
     graph.add_edge("format_agent",         "save_to_db")
     graph.add_edge("save_to_db",           "send_notification")
     graph.add_edge("send_notification",    END)
@@ -322,6 +325,7 @@ def main():
         final_report="",
         db_row_id=None,
         portfolio_advice="",
+        section2_text="",
     )
 
     logger.info("Invoking LangGraph workflow...")
