@@ -422,6 +422,46 @@ def update_portfolio_item(
     log_audit("user_portfolio", "UPDATE", item_id, "dashboard", before=before, after=after)
 
 
+def update_portfolio_analyze_flag(
+    updates: list[dict],
+    user_id: Optional[str] = None,
+    _caller: Optional[str] = None,
+) -> int:
+    """Bulk-set analyze_flag on user_portfolio rows. `updates` is a list of
+    {"id": int, "analyze_flag": 0|1} dicts. Returns rows affected.
+
+    Enforces sum(analyze_flag) <= 10 server-side as defence-in-depth (the
+    dashboard already validates client-side, and line_webhook precheck blocks
+    adds at 10). If the resulting sum would exceed 10, the entire transaction
+    is rolled back via raising ValueError before commit."""
+    validate_tool_permission("update_portfolio_analyze_flag", _caller)
+    rows_affected = 0
+    with _engine().begin() as conn:
+        for u in updates:
+            res = conn.execute(
+                text("""
+                    UPDATE user_portfolio
+                    SET analyze_flag = :flag
+                    WHERE id = :id
+                      AND (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+                """),
+                {"flag": int(u["analyze_flag"]), "id": int(u["id"]), "uid": user_id},
+            )
+            rows_affected += res.rowcount
+        total = conn.execute(
+            text("""
+                SELECT COALESCE(SUM(analyze_flag), 0) FROM user_portfolio
+                WHERE (line_user_id = :uid OR (:uid IS NULL AND line_user_id IS NULL))
+            """),
+            {"uid": user_id},
+        ).scalar()
+        if int(total) > 10:
+            raise ValueError(
+                f"analyze_flag sum {total} exceeds 10-stock cap — transaction aborted"
+            )
+    return rows_affected
+
+
 def update_portfolio_entry_price(
     stock_id: str,
     entry_price: float,
@@ -890,6 +930,8 @@ _TOOL_PERMISSION_RULES: dict[str, list[str]] = {
     "add_portfolio_item":  ["dashboard", "line_webhook"],
     "delete_portfolio_item": ["dashboard", "line_webhook"],
     "update_portfolio_item": ["dashboard", "line_webhook"],
+    # Phase 3 §3 — dashboard-only analyze_flag toggle (10-stock cap)
+    "update_portfolio_analyze_flag": ["dashboard"],
     "send_line":           ["send_notification", "alert_runner", "investment_workflow",
                             "daily_run", "backtest_agent", "optimizer_revert_check"],
     "send_telegram":       ["send_notification", "alert_runner", "investment_workflow",
@@ -898,7 +940,7 @@ _TOOL_PERMISSION_RULES: dict[str, list[str]] = {
     # by ReAct loops; portfolio_manager / tech_analyst are also allowed for
     # direct calls outside the loop):
     "get_portfolio":       ["dashboard", "portfolio_manager", "agent_loop",
-                            "investment_workflow"],
+                            "investment_workflow", "line_webhook"],
     "get_user_portfolio":  ["portfolio_manager", "agent_loop", "investment_workflow",
                             "daily_run"],
     "calculate_pnl":       ["portfolio_manager", "dashboard", "agent_loop",

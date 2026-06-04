@@ -114,6 +114,17 @@ def _handle_query(user_id: str) -> str:
 
 
 def _handle_add(user_id: str, stock_id: str, qty: int, entry: float) -> str:
+    # Phase 3 §3: refuse the add if it would push analyze_flag count to 11+.
+    # New rows insert with analyze_flag=1 (DDL default), so a user already
+    # holding 10 flagged stocks would silently exceed the cap. Tell them how
+    # to fix it themselves rather than performing a silent no-op.
+    from database_tools import get_portfolio
+    existing = get_portfolio(user_id=user_id, _caller="line_webhook")
+    flagged = sum(int(h.get("analyze_flag", 1)) for h in existing)
+    if flagged >= 10:
+        return ("⚠️ 您已有 10 檔個股設為「分析」，無法再新增。\n"
+                "請先到 Dashboard 取消勾選不需分析的個股，或刪除既有持倉再試。")
+
     ok = add_portfolio_item(
         stock_id=stock_id,
         entry_price=entry,

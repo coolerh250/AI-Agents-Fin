@@ -545,6 +545,12 @@ def _build_portfolio_user_msg(state: WorkflowState) -> tuple[str, list[dict]]:
     holdings = get_user_portfolio(user_id=_OWNER_LINE_ID, _caller="portfolio_manager")
     if not holdings:
         return "", []
+    # Phase 3 §3: only analyze flagged stocks, hard cap at 10 — created-at order
+    # is preserved by get_user_portfolio so flag=1 + first-10 is deterministic.
+    holdings = [h for h in holdings if int(h.get("analyze_flag", 1))][:10]
+    if not holdings:
+        logger.info("[PortfolioManager] 無勾選分析的持股 — 跳過")
+        return "", []
 
     try:
         enriched = calculate_pnl(holdings, _caller="portfolio_manager")
@@ -746,6 +752,11 @@ def generate_portfolio_analysis_for_user(
     holdings = get_user_portfolio(user_id=user_id, _caller="daily_run")
     if not holdings:
         logger.info(f"[PortfolioAnalysis] {user_id[:12]}... 無持倉資料，略過")
+        return ""
+    # Phase 3 §3: same analyze_flag filter + 10-cap as owner path
+    holdings = [h for h in holdings if int(h.get("analyze_flag", 1))][:10]
+    if not holdings:
+        logger.info(f"[PortfolioAnalysis] {user_id[:12]}... 無勾選分析的持股，略過")
         return ""
 
     try:

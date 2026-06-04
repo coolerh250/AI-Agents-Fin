@@ -43,6 +43,7 @@ from database_tools import (
     get_shadow_summary_per_agent,
     get_workflow_runs,
     save_actual,
+    update_portfolio_analyze_flag,
     update_portfolio_item,
 )
 
@@ -376,6 +377,7 @@ with tab_portfolio:
 
             # Edit holdings
             st.subheader("編輯持倉")
+            st.caption("勾選「分析」欄決定每日報告 §3 要分析的個股 — 最多 10 檔")
             edit_df = pd.DataFrame([
                 {
                     "id":       int(r["id"]),
@@ -384,6 +386,7 @@ with tab_portfolio:
                     "股數":     int(r["quantity"]),
                     "止損%":    float(r["stop_loss_level"]),
                     "策略":     r["strategy_type"],
+                    "分析":     bool(r.get("analyze_flag", 1)),
                 }
                 for r in pnl_rows
             ])
@@ -396,26 +399,55 @@ with tab_portfolio:
                     "股數":     st.column_config.NumberColumn("股數",     min_value=1, step=100),
                     "止損%":    st.column_config.NumberColumn("止損%",    min_value=0.1, max_value=50.0, step=0.5),
                     "策略":     st.column_config.SelectboxColumn("策略",  options=["波段", "長抱", "存股", "當沖"]),
+                    "分析":     st.column_config.CheckboxColumn(
+                                  "分析",
+                                  help="勾選的個股會在每日報告 §3 分析（最多 10 檔）",
+                                  default=True,
+                              ),
                 },
                 hide_index=True,
                 use_container_width=True,
                 key="portfolio_editor",
             )
 
+            # Live count of analyze_flag selections — surfaces the cap before save
+            _sum_analyze = int(edited["分析"].sum())
+            if _sum_analyze > 10:
+                st.warning(f"⚠️ 目前勾選 {_sum_analyze} 檔，超過 10 檔上限 — 儲存將被拒絕")
+            else:
+                st.caption(f"目前勾選 {_sum_analyze}/10 檔")
+
             if st.button("💾 儲存變更"):
-                for _, row in edited.iterrows():
-                    update_portfolio_item(
-                        int(row["id"]),
-                        int(row["股數"]),
-                        float(row["止損%"]),
-                        str(row["策略"]),
-                        entry_price=float(row["成本(元)"]),
-                        user_id=_current_uid,
-                        _caller="dashboard",
-                    )
-                st.cache_data.clear()
-                st.success("已儲存所有變更")
-                st.rerun()
+                if _sum_analyze > 10:
+                    st.error(f"分析勾選不可超過 10 檔（目前 {_sum_analyze}）— 已取消儲存")
+                else:
+                    for _, row in edited.iterrows():
+                        update_portfolio_item(
+                            int(row["id"]),
+                            int(row["股數"]),
+                            float(row["止損%"]),
+                            str(row["策略"]),
+                            entry_price=float(row["成本(元)"]),
+                            user_id=_current_uid,
+                            _caller="dashboard",
+                        )
+                    flag_updates = [
+                        {"id": int(row["id"]),
+                         "analyze_flag": 1 if bool(row["分析"]) else 0}
+                        for _, row in edited.iterrows()
+                    ]
+                    try:
+                        update_portfolio_analyze_flag(
+                            flag_updates,
+                            user_id=_current_uid,
+                            _caller="dashboard",
+                        )
+                    except ValueError as exc:
+                        st.error(f"分析勾選儲存失敗：{exc}")
+                    else:
+                        st.cache_data.clear()
+                        st.success("已儲存所有變更")
+                        st.rerun()
 
             # Delete holding
             with st.expander("🗑️ 刪除持倉"):
