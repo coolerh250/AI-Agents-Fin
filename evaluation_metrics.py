@@ -24,6 +24,56 @@ def _strip_fence(text: str) -> str:
     return text.strip()
 
 
+def _extract_tech_json(raw: str) -> Optional[dict]:
+    """Extract the gap_direction JSON object from tech_analyst output.
+
+    Mirrors market_analyst_agents._extract_tech_json — duplicated here so this
+    module stays free of workflow imports. Handles three formats:
+      1. pure JSON (v1 single-shot)
+      2. ```json\n{...}\n``` markdown-wrapped
+      3. preamble + JSON (Phase 1.5 ReAct loop's final_text emits a free-form
+         summary / markdown table BEFORE the JSON object)
+
+    Returns None when no JSON containing "gap_direction" can be located."""
+    s = raw.strip()
+    if s.startswith("```"):
+        s = s.split("```", 2)[1]
+        s = s[s.index("\n") + 1:] if "\n" in s else s
+    try:
+        return json.loads(s.strip())
+    except json.JSONDecodeError:
+        pass
+    needle = '"gap_direction"'
+    needle_idx = s.find(needle)
+    if needle_idx < 0:
+        return None
+    depth, start = 0, -1
+    for i in range(needle_idx - 1, -1, -1):
+        c = s[i]
+        if c == '}':
+            depth += 1
+        elif c == '{':
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    if start < 0:
+        return None
+    depth = 0
+    for j in range(start, len(s)):
+        c = s[j]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(s[start:j + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def eval_data_collector(raw_dict: dict) -> dict:
     """
     Evaluate data_collector completeness via session_episodes-reconstructed dict.
@@ -135,8 +185,11 @@ def eval_tech_analyst(text: str) -> dict:
     estimated_gap_pct = None
     score = 0.0
 
-    try:
-        parsed = json.loads(_strip_fence(text))
+    parsed = _extract_tech_json(text)
+    if parsed is None:
+        missing_fields.append("json_parse_failed")
+        hallucination_flags.append("json_parse_failed")
+    else:
         json_parseable = True
         score += 30.0
 
@@ -164,10 +217,6 @@ def eval_tech_analyst(text: str) -> dict:
             hallucination_flags.append("direction_pct_mismatch")
         elif (gap_direction == "down" and isinstance(estimated_gap_pct, (int, float)) and estimated_gap_pct > 0):
             hallucination_flags.append("direction_pct_mismatch")
-
-    except (json.JSONDecodeError, ValueError):
-        missing_fields.append("json_parse_failed")
-        hallucination_flags.append("json_parse_failed")
 
     schema_valid = (
         json_parseable
