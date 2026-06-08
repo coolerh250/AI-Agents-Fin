@@ -69,21 +69,33 @@ def _load_agent_outputs(run_id_ref: Optional[str], trade_date: date) -> dict:
             with _engine().connect() as conn:
                 rows = conn.execute(
                     text("""
-                        SELECT agent_name, raw_response
+                        SELECT agent_name, raw_response, finish_reason
                         FROM llm_traces
                         WHERE run_id = :rid
                         ORDER BY id ASC
                     """),
                     {"rid": run_id_ref},
                 ).fetchall()
-            # Shadow mode logs extra traces under the same agent_name. The
-            # primary (production) trace is written first, so keep the first
-            # non-empty trace per agent and ignore later shadow ReAct traces —
-            # the evaluation grades production output, not the shadow.
+            # ReAct loops (Phase 1.5+) write one llm_trace per iteration.
+            # Iter 1 typically finish_reason='tool_use' (Chinese commentary
+            # explaining why tools are about to be called) — that text is NOT
+            # the production output. The terminal iteration finishes with
+            # 'end_turn' and contains the actual JSON/final answer.
+            # First pass: prefer the earliest end_turn trace per agent.
+            # Shadow traces are written AFTER primary, so the first end_turn
+            # is always the primary's — same property the old "first non-empty"
+            # filter relied on for shadow isolation.
             for row in rows:
-                name = row[0]
-                if name in outputs and row[1] and not outputs[name]:
-                    outputs[name] = str(row[1])
+                name, raw, finish = row[0], row[1], row[2]
+                if name in outputs and raw and finish == "end_turn" and not outputs[name]:
+                    outputs[name] = str(raw)
+            # Second pass: agents without an end_turn trace (errored / hit
+            # max_tokens / single-shot agents that still get a tool_use stop)
+            # fall back to the first non-empty trace.
+            for row in rows:
+                name, raw = row[0], row[1]
+                if name in outputs and raw and not outputs[name]:
+                    outputs[name] = str(raw)
             logger.debug(f"[eval] Loaded {len(rows)} llm_trace rows for run_id={run_id_ref}")
         except Exception as exc:
             logger.warning(f"[eval] llm_traces load failed: {exc}")
