@@ -978,6 +978,55 @@ def send_notification_node(state: WorkflowState) -> dict:
 
 # ── Node: SaveToDB (no LLM) ───────────────────────────────────────────────────
 
+def _extract_tech_json(raw: str) -> Optional[dict]:
+    """Extract the gap_direction JSON object from tech_analyst's output.
+
+    Handles three formats:
+      1. pure JSON (v1 single-shot path — prompt obeyed strictly)
+      2. ```json\n{...}\n``` markdown-wrapped (legacy back-compat)
+      3. preamble + JSON (Phase 1.5 ReAct loop's final_text — model emits a
+         free-form summary / markdown table BEFORE the JSON object)
+
+    Returns None when no JSON containing "gap_direction" can be located."""
+    s = raw.strip()
+    if s.startswith("```"):
+        s = s.split("```", 2)[1]
+        s = s[s.index("\n") + 1:] if "\n" in s else s
+    try:
+        return json.loads(s.strip())
+    except json.JSONDecodeError:
+        pass
+    needle = '"gap_direction"'
+    needle_idx = s.find(needle)
+    if needle_idx < 0:
+        return None
+    depth, start = 0, -1
+    for i in range(needle_idx - 1, -1, -1):
+        c = s[i]
+        if c == '}':
+            depth += 1
+        elif c == '{':
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    if start < 0:
+        return None
+    depth = 0
+    for j in range(start, len(s)):
+        c = s[j]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(s[start:j + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def save_to_db_node(state: WorkflowState) -> dict:
     from telemetry import emit_event
     run_id = state.get("run_id")
@@ -988,15 +1037,14 @@ def save_to_db_node(state: WorkflowState) -> dict:
 
         gap_pct: Optional[float] = None
         gap_dir: Optional[str] = None
-        try:
-            raw = state["tech_report"].strip()
-            if raw.startswith("```"):
-                raw = raw.split("```", 2)[1]
-                raw = raw[raw.index("\n") + 1:] if "\n" in raw else raw
-            tech = json.loads(raw)
-            gap_pct = float(tech.get("estimated_gap_pct", 0))
+        tech = _extract_tech_json(state.get("tech_report", "") or "")
+        if tech is not None:
+            try:
+                gap_pct = float(tech.get("estimated_gap_pct", 0))
+            except (TypeError, ValueError):
+                gap_pct = None
             gap_dir = tech.get("gap_direction")
-        except Exception:
+        else:
             emit_event(run_id, "output_invalid", "tech_analyst",
                        {"reason": "json_parse_failed_in_save_to_db"}, severity="warn")
 
