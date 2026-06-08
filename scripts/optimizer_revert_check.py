@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REGRESSION_FACTOR = 0.90       # promoted score below 90% of baseline => regression
-SCORE_WINDOW_DAYS = 7
+SCORE_WINDOW_DAYS = 14         # aligned with optimizer_run.SHADOW_WINDOW_DAYS (2026-06-08)
 ALERT_DEDUP_HOURS = 24
 
 
@@ -52,8 +52,8 @@ def main() -> int:
     from database_tools import get_promoted_within_days
     from optimizer_scoring import score_version
 
-    promoted = get_promoted_within_days(days=7)
-    print(f"[revert_check] {len(promoted)} optimizer version(s) promoted in last 7d")
+    promoted = get_promoted_within_days(days=SCORE_WINDOW_DAYS)
+    print(f"[revert_check] {len(promoted)} optimizer version(s) promoted in last {SCORE_WINDOW_DAYS}d")
 
     regressions = 0
     for row in promoted:

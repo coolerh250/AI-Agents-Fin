@@ -204,8 +204,10 @@ def eval_tech_analyst(text: str) -> dict:
         estimated_gap_pct = parsed.get("estimated_gap_pct")
         if isinstance(estimated_gap_pct, (int, float)):
             score += 20.0
-            # Range check (+20)
-            if abs(estimated_gap_pct) <= 5.0:
+            # Range check (+20) — TWSE daily limit is ±10%, so anything beyond
+            # that is structurally impossible. 5% was too tight (flagged the
+            # legitimate -6.46% prediction on 2026-06-08 when SOX -10.26%).
+            if abs(estimated_gap_pct) <= 10.0:
                 score += 20.0
             else:
                 hallucination_flags.append("gap_pct_out_of_range")

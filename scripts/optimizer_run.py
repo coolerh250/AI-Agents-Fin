@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 load_dotenv()
 
-MIN_SHADOW_RUNS = 10
+MIN_SHADOW_RUNS = 7      # lowered 10→7 (2026-06-08): tech_analyst sits at 9 after v3 promote stopped self-shadow, would otherwise be gated forever
 SHADOW_WINDOW_DAYS = 14
 
 
