@@ -1,0 +1,23 @@
+[Unit]
+Description=AI Agent Studio - Streamlit Dashboard
+Documentation=https://github.com/coolerh250/AI-Agents-Fin
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${REPO_ROOT}
+Environment=PATH=${UV_BIN_DIR}:/usr/local/bin:/usr/bin:/bin
+ExecStart=${UV_BIN} run streamlit run dashboard.py \
+  --server.port 8501 \
+  --server.address 127.0.0.1 \
+  --server.headless true \
+  --browser.gatherUsageStats false
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:${REPO_ROOT}/logs/dashboard.log
+StandardError=append:${REPO_ROOT}/logs/dashboard.log
+
+[Install]
+WantedBy=multi-user.target

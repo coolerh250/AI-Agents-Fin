@@ -1,0 +1,27 @@
+# AI Agent Studio crontab — rendered by deploy/render_templates.py
+# Source of truth: this template (deploy/templates/crontab.tmpl)
+# Schedule fields are UTC. Taipei (UTC+8, no DST) equivalents in comments.
+# REPO_ROOT and UV_BIN are substituted at install time.
+
+# Make uv available to cron (cron's PATH is minimal)
+PATH=${UV_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+REPO_ROOT=${REPO_ROOT}
+
+# Daily investment workflow — 08:00 Taipei = 00:00 UTC, Mon-Fri
+0 0 * * 1-5 ${REPO_ROOT}/daily_run.sh >> ${REPO_ROOT}/logs/daily_run.log 2>&1
+# Daily alert check — 08:20 Taipei = 00:20 UTC, Mon-Fri
+20 0 * * 1-5 cd ${REPO_ROOT} && ${UV_BIN} run python alert_runner.py >> ${REPO_ROOT}/logs/alerts.log 2>&1
+# Weekly alert digest — Sun 09:00 Taipei = Sun 01:00 UTC
+0 1 * * 0 cd ${REPO_ROOT} && ${UV_BIN} run python alert_runner.py --weekly >> ${REPO_ROOT}/logs/alerts.log 2>&1
+# Daily DB backup — 22:00 Taipei = 14:00 UTC
+0 14 * * * ${REPO_ROOT}/backup_db.sh >> ${REPO_ROOT}/logs/backup.log 2>&1
+# Weekly optimizer pass — Sun 03:00 Taipei = Sat 19:00 UTC
+0 19 * * 6 cd ${REPO_ROOT} && ${UV_BIN} run python scripts/optimizer_run.py >> ${REPO_ROOT}/logs/optimizer.log 2>&1
+# Daily optimizer regression watch — 02:00 Taipei = 18:00 UTC
+0 18 * * * cd ${REPO_ROOT} && ${UV_BIN} run python scripts/optimizer_revert_check.py >> ${REPO_ROOT}/logs/optimizer.log 2>&1
+# Phase 3 §2 sentiment collectors — 15:30 Taipei = 07:30 UTC, Mon-Fri (post-close + buffer)
+30 7 * * 1-5 cd ${REPO_ROOT} && ${UV_BIN} run python sentiment_collectors.py --source all >> ${REPO_ROOT}/logs/sentiment.log 2>&1
+# Phase 3 §2 weekly screen + Haiku narrative — Sun 03:30 Taipei = Sat 19:30 UTC
+30 19 * * 6 cd ${REPO_ROOT} && ${UV_BIN} run python scripts/section2_weekly.py >> ${REPO_ROOT}/logs/section2.log 2>&1
+# Phase 3 §2 indicator backtest (50 stocks, observe-only) — Sun 03:45 Taipei = Sat 19:45 UTC
+45 19 * * 6 cd ${REPO_ROOT} && ${UV_BIN} run python scripts/section2_backtest.py --top-n 50 >> ${REPO_ROOT}/logs/section2.log 2>&1

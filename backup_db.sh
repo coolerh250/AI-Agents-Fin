@@ -1,9 +1,12 @@
 #!/bin/bash
 # backup_db.sh — TiDB agent_memory daily backup via Python/SQLAlchemy
-# Crontab: 0 22 * * * /home/itadmin/ai_agent_studio/backup_db.sh >> /home/itadmin/logs/backup.log 2>&1
+# Crontab installs this via the Makefile's `cron` target; the rendered cron
+# entry passes REPO_ROOT to make the path portable across deploy hosts.
+# Default behavior (no env vars set) preserves the original /home/itadmin layout.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="/home/itadmin/backups/tidb"
+REPO_ROOT="${REPO_ROOT:-$SCRIPT_DIR}"
+BACKUP_DIR="${BACKUP_DIR:-$REPO_ROOT/backups/tidb}"
 DATE=$(date +%Y%m%d)
 OUTFILE="$BACKUP_DIR/agent_memory_$DATE.sql"
 

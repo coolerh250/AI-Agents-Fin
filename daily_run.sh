@@ -1,13 +1,20 @@
 #!/bin/bash
 # daily_run.sh — Taiwan Stock Futures Analysis Team daily automation
-# Crontab: 0 8 * * 1-5 /home/itadmin/ai_agent_studio/daily_run.sh >> /home/itadmin/ai_agent_studio/logs/daily_run.log 2>&1
+# Cron-installed via the Makefile's `cron` target; the rendered cron entry
+# exports REPO_ROOT so paths are portable across deploy hosts. Default
+# behaviour (no env) resolves REPO_ROOT to this file's directory so manual
+# invocation still works.
 set -euo pipefail
 
-LOG_DIR="/home/itadmin/ai_agent_studio/logs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$SCRIPT_DIR}"
+LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs}"
 mkdir -p "$LOG_DIR"
 
-source /home/itadmin/.local/bin/env
-cd /home/itadmin/ai_agent_studio
+# uv installer drops env into ~/.local/bin/env; cron's PATH won't see it.
+UV_ENV="${UV_ENV:-$HOME/.local/bin/env}"
+[ -f "$UV_ENV" ] && source "$UV_ENV"
+cd "$REPO_ROOT"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 

@@ -58,103 +58,74 @@
 
 ## 部署方式
 
-> 以下指令以 Linux 主機為例。所有機密值（API key、資料庫密碼、LINE token 等）一律寫入本機 `.env`，**切勿提交至版本庫** —— `.env` 已列入 `.gitignore`。
+> 以下指令以 Ubuntu/Debian 主機為例。所有機密值（API key、資料庫密碼、LINE token 等）一律寫入本機 `.env`，**切勿提交至版本庫** —— `.env` 已列入 `.gitignore`。
+
+### 一鍵安裝（推薦）
+
+```bash
+git clone https://github.com/coolerh250/AI-Agents-Fin.git ai_agent_studio
+cd ai_agent_studio
+make install
+```
+
+`make install` 會依序執行：依賴檢/裝 → `.env` 互動式蒐集 → TiDB 啟動 → DB 建表 → 策略 profile seed → 市場快照 → systemd 服務 → user crontab → 健康檢查。整段流程 ~3 分鐘、冪等可重跑。
+
+> 完整 target 清單 `make help`；個別步驟可獨立跑（`make seed`、`make services`、`make verify` 等）方便除錯。
 
 ### 前置需求
 
-- Python ≥ 3.13
-- [uv](https://github.com/astral-sh/uv)
-- Docker + Docker Compose
-- Git
+- Ubuntu 22.04+ / Debian 12+
+- Python 3.13+（`make install-deps` 會自動裝 [uv](https://github.com/astral-sh/uv)）
+- Docker（`make install-deps` 會用官方 installer 裝）
+- `sudo` 權限（裝 systemd 服務時用）
 
-### 1. 取得程式碼
+### 步驟分解（給除錯用，正常不需照跑）
 
-```bash
-git clone https://github.com/coolerh250/AI-Agents-Fin.git
-cd AI-Agents-Fin
-```
+| 指令 | 內容 |
+|---|---|
+| `make install-deps` | 檢/裝 uv + Docker + `uv sync` 同步 Python 依賴 |
+| `make env` | 若 `.env` 不存在則跑 `deploy/prompt_secrets.py` 互動蒐集（必填項目參考 [`.env.template`](.env.template)）|
+| `make db-up` | `docker compose up -d` TiDB + poll port 4000 就緒 |
+| `make db-init` | 跑全部 19 個 `ensure_*_table()`（冪等 CREATE TABLE IF NOT EXISTS）|
+| `make seed` | `seed_initial_profiles()` + `seed_sentiment_curator()` 寫 6+1 個 v1 策略 profile |
+| `make snapshot` | `test_collection.py` 產 `market_snapshot.json`（每日 workflow 入口）|
+| `make services` | 渲 systemd unit 樣板（`deploy/templates/*.tmpl`）→ sudo install + enable --now |
+| `make cron` | 渲 crontab 樣板 → `crontab -` 安裝 user crontab（9 條 entries）|
+| `make verify` | dashboard `:8501/_stcore/health` + webhook `:8502/health` + TiDB + cron + snapshot 健康檢查 |
+| `make status` | 顯示目前 systemd / docker compose / cron 狀態 |
+| `make clean` | 停服務、移 systemd unit、清 crontab、`docker compose down`（互動確認，不刪 `.env` 與 DB volume）|
 
-### 2. 安裝相依套件
+### 機密項目
 
-```bash
-uv sync
-```
+`deploy/prompt_secrets.py` 會逐項互動詢問（敏感欄位輸入隱藏）：
 
-### 3. 啟動 TiDB
+| 必填 | 變數 |
+|---|---|
+| Anthropic | `ANTHROPIC_API_KEY` |
+| TiDB | `TIDB_PASSWORD`（host/port/user/db 預設值已對齊本地 docker compose）|
+| LINE | `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` / `LINE_WEBHOOK_SECRET` |
+| 可選 Telegram fallback | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` |
+| 自動產生 | `MCP_WRITE_TOKEN` / `MCP_NOTIFY_TOKEN`（每環境隨機）|
 
-```bash
-docker compose -f docker/docker-compose.yml up -d
-```
+預設旗標：`SHADOW_AGENTS=tech_analyst,portfolio_manager,sentiment_curator`、`OPTIMIZER_ENABLED=0`、`SECTION2_ENABLED=true`。完整清單見 [`.env.template`](.env.template)。
 
-TiDB 僅綁定 `127.0.0.1`，不對外網開放。資料持久化於 `docker/data/`。
+### Cron 排程內容（`make cron` 自動安裝）
 
-### 4. 設定環境變數
+樣板在 [`deploy/templates/crontab.tmpl`](deploy/templates/crontab.tmpl)、安裝時把 `${REPO_ROOT}` / `${UV_BIN}` 替換為本機實際路徑。所有時間都是 UTC：
 
-```bash
-cp .env.template .env
-```
-
-接著編輯 `.env`，填入你自己的值。需設定的項目分為以下類別（**實際值請勿寫入文件或版本庫**）：
-
-| 類別 | 變數 | 說明 |
+| UTC | Taipei | 任務 |
 |---|---|---|
-| Anthropic | `ANTHROPIC_API_KEY` | Claude API 金鑰 |
-| TiDB | `TIDB_HOST` / `TIDB_PORT` / `TIDB_USER` / `TIDB_PASSWORD` / `TIDB_DB` | 資料庫連線 |
-| LINE | `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` / `LINE_WEBHOOK_SECRET` | 推播與 webhook |
-| MCP | `MCP_WRITE_TOKEN` / `MCP_NOTIFY_TOKEN` | MCP server 驗證 token |
-| Shadow / Optimizer | `SHADOW_AGENTS` / `OPTIMIZER_ENABLED` / `OPTIMIZER_AGENTS` / `OPTIMIZER_COST_CAP_USD` | 自我優化開關 |
+| `0 0 * * 1-5` | 08:00 | `daily_run.sh`（每日投資工作流）|
+| `20 0 * * 1-5` | 08:20 | `alert_runner.py`（告警檢查）|
+| `0 1 * * 0` | 09:00 Sun | `alert_runner.py --weekly`（週度告警摘要）|
+| `0 14 * * *` | 22:00 | `backup_db.sh` |
+| `30 7 * * 1-5` | 15:30 | `sentiment_collectors.py --source all` |
+| `0 18 * * *` | 02:00 | `scripts/optimizer_revert_check.py` |
+| `0 19 * * 6` | 03:00 Sun | `scripts/optimizer_run.py` |
+| `30 19 * * 6` | 03:30 Sun | `scripts/section2_weekly.py` |
+| `45 19 * * 6` | 03:45 Sun | `scripts/section2_backtest.py --top-n 50` |
 
-完整清單與註解見 [`.env.template`](.env.template)。
-
-### 5. 初始化資料庫
-
-建立資料庫並建表（資料表定義為冪等，可重複執行）：
-
-```bash
-uv run python -c "
-from database_tools import ensure_observability_tables
-ensure_observability_tables()
-print('tables ready')
-"
-```
-
-（可選）將現有 agent prompt 寫入策略資料表作為 v1：
-
-```bash
-uv run python -c "
-from strategy_profile import seed_initial_profiles, seed_pilot_shadow_profiles
-seed_initial_profiles()
-seed_pilot_shadow_profiles()
-"
-```
-
-資料表 schema 參考 [`migration.sql`](migration.sql)。
-
-### 6. （選用）系統服務
-
-Dashboard 與 LINE webhook 建議以 systemd 服務常駐：
-
-- `ai-agent-dashboard` — `streamlit run dashboard.py`
-- `ai-agent-webhook` — `uvicorn` 執行 `line_webhook.py`
-
-### 7. （選用）排程
-
-每日工作流與相關維運以 cron 排定。**注意：cron 排程欄位請使用 UTC 時間**（部分 Linux cron 不會套用 `CRON_TZ`）：
-
-```cron
-# 每日投資工作流 — 08:00 台北 = 00:00 UTC，週一至週五
-0 0 * * 1-5  /path/to/ai_agent_studio/daily_run.sh >> logs/daily_run.log 2>&1
-# 每日告警檢查 — 08:20 台北 = 00:20 UTC
-20 0 * * 1-5 cd /path/to/ai_agent_studio && uv run python alert_runner.py >> logs/alerts.log 2>&1
-# 每日資料庫備份 — 22:00 台北 = 14:00 UTC
-0 14 * * *   /path/to/ai_agent_studio/backup_db.sh >> logs/backup.log 2>&1
-# 每週 Optimizer — 週日 03:00 台北 = 週六 19:00 UTC
-0 19 * * 6   cd /path/to/ai_agent_studio && uv run python scripts/optimizer_run.py >> logs/optimizer.log 2>&1
-# 每日 Optimizer 回歸監測 — 02:00 台北 = 18:00 UTC
-0 18 * * *   cd /path/to/ai_agent_studio && uv run python scripts/optimizer_revert_check.py >> logs/optimizer.log 2>&1
-```
-
-> `logs/` 目錄須存在（版本庫內已含 `logs/.gitkeep`），否則 cron 的輸出重導向會失敗。
+> `logs/` 目錄已含 `logs/.gitkeep` 預先存在，cron 輸出重導向不會失敗。
 
 ---
 

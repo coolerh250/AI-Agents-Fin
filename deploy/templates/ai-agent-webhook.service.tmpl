@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Agent Studio - LINE Webhook (FastAPI/uvicorn)
+Documentation=https://github.com/coolerh250/AI-Agents-Fin
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${REPO_ROOT}
+Environment=PATH=${UV_BIN_DIR}:/usr/local/bin:/usr/bin:/bin
+ExecStart=${UV_BIN} run uvicorn line_webhook:app \
+  --host 0.0.0.0 \
+  --port 8502
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:${REPO_ROOT}/logs/webhook.log
+StandardError=append:${REPO_ROOT}/logs/webhook.log
+
+[Install]
+WantedBy=multi-user.target
