@@ -15,7 +15,11 @@
 #   make verify
 
 SHELL := /bin/bash
-.SHELLFLAGS := -eu -o pipefail -c
+# -e + pipefail catch real failures; -u disabled because /etc/bash.bashrc on
+# Ubuntu references $PS1 and emits noisy "unbound variable" lines in non-
+# interactive shells. -u doesn't add safety for this Makefile's targets
+# (recipes use $(make-vars) and $$shell-locals that are always set).
+.SHELLFLAGS := -e -o pipefail -c
 .ONESHELL:
 .DEFAULT_GOAL := help
 
