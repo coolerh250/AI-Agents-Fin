@@ -50,6 +50,11 @@ uv run python backtest_agent.py || echo "⚠️  backtest_agent 失敗（略過�
 echo "[$(ts)] Step 2: 分析團隊執行 + 建議書存入 DB"
 uv run investment_workflow.py
 
+echo "[$(ts)] Step 2.1: 預測器記分板 — 補今日基準預測（Prediction Step 1）"
+# Reads today's features (just written to session_episodes by Step 2) and appends
+# the baseline predictors' calls. Scored next day after backtest backfills actuals.
+uv run python scripts/predictor_scoreboard.py append --date today || echo "⚠️  predictor_scoreboard 失敗（略過）"
+
 echo "[$(ts)] Step 2.5: 發送個人化持股分析給非擁有者使用者"
 uv run python - <<'PYEOF'
 import os

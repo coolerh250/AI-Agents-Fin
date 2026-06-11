@@ -623,6 +623,7 @@ def ensure_observability_tables() -> None:
     ensure_section2_picks_table()               # Phase 3: §2 weekly picks
     ensure_backtest_indicator_winrate_table()   # Phase 3: per-stock indicator winrate
     ensure_ohlcv_daily_cache_table()            # Phase 3: yfinance cache
+    ensure_predictor_predictions_table()        # Prediction Step 1: scoreboard
 
     # Migrate cost_logs: add thinking_tokens, run_id if missing
     for stmt, label in [
@@ -1211,6 +1212,7 @@ def ensure_session_episodes_table() -> None:
                     ndx_chg_pct         DECIMAL(6,3)  NULL,
                     sox_chg_pct         DECIMAL(6,3)  NULL,
                     tsm_adr_chg_pct     DECIMAL(6,3)  NULL,
+                    night_futures_chg_pct DECIMAL(6,3) NULL,
                     divergence_signal   TINYINT       NULL,
                     regime_sox          VARCHAR(10)   NULL,
                     regime_foreign_oi   VARCHAR(10)   NULL,
@@ -1221,6 +1223,14 @@ def ensure_session_episodes_table() -> None:
                     INDEX idx_se_created (created_at)
                 )
             """))
+            # Migrate existing tables: add night_futures_chg_pct (Prediction Step 1).
+            try:
+                conn.execute(text(
+                    "ALTER TABLE session_episodes "
+                    "ADD COLUMN night_futures_chg_pct DECIMAL(6,3) NULL"
+                ))
+            except Exception:
+                pass  # already applied — expected on subsequent runs
     except Exception as exc:
         logger.warning(f"[migration] ensure_session_episodes_table failed: {exc}")
 
@@ -1238,6 +1248,7 @@ def log_session_episode(
     ndx_chg_pct: Optional[float] = None,
     sox_chg_pct: Optional[float] = None,
     tsm_adr_chg_pct: Optional[float] = None,
+    night_futures_chg_pct: Optional[float] = None,
     divergence_signal: Optional[bool] = None,
     workflow_cost_usd: Optional[float] = None,
 ) -> None:
@@ -1258,11 +1269,13 @@ def log_session_episode(
                         (run_id, trade_date, brief_id, predicted_direction, predicted_gap_pct,
                          foreign_oi_net, trust_oi_net, dealer_oi_net,
                          djia_chg_pct, ndx_chg_pct, sox_chg_pct, tsm_adr_chg_pct,
+                         night_futures_chg_pct,
                          divergence_signal, regime_sox, regime_foreign_oi, workflow_cost_usd)
                     VALUES
                         (:run_id, :td, :brief_id, :pred_dir, :pred_gap,
                          :foreign, :trust, :dealer,
                          :djia, :ndx, :sox, :tsm,
+                         :nf,
                          :div, :regime_sox, :regime_foi, :cost)
                     ON DUPLICATE KEY UPDATE
                         run_id              = VALUES(run_id),
@@ -1276,6 +1289,7 @@ def log_session_episode(
                         ndx_chg_pct         = VALUES(ndx_chg_pct),
                         sox_chg_pct         = VALUES(sox_chg_pct),
                         tsm_adr_chg_pct     = VALUES(tsm_adr_chg_pct),
+                        night_futures_chg_pct = VALUES(night_futures_chg_pct),
                         divergence_signal   = VALUES(divergence_signal),
                         regime_sox          = VALUES(regime_sox),
                         regime_foreign_oi   = VALUES(regime_foreign_oi),
@@ -1286,6 +1300,7 @@ def log_session_episode(
                  "foreign": foreign_oi_net, "trust": trust_oi_net, "dealer": dealer_oi_net,
                  "djia": djia_chg_pct, "ndx": ndx_chg_pct,
                  "sox": sox_chg_pct, "tsm": tsm_adr_chg_pct,
+                 "nf": night_futures_chg_pct,
                  "div": int(divergence_signal) if divergence_signal is not None else None,
                  "regime_sox": regime_sox, "regime_foi": regime_foreign_oi,
                  "cost": workflow_cost_usd},
@@ -2137,6 +2152,79 @@ def ensure_ohlcv_daily_cache_table() -> None:
             """))
     except Exception as exc:
         logger.warning(f"[migration] ensure_ohlcv_daily_cache_table failed: {exc}")
+
+
+def ensure_predictor_predictions_table() -> None:
+    """Prediction Step 1: per-day prediction from each scoreboard predictor
+    (naive / weighted_rule / unconditional_majority / llm_tech_analyst).
+    Scored against market_actuals by get_predictor_leaderboard. Idempotent."""
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS predictor_predictions (
+                    id              BIGINT        AUTO_INCREMENT PRIMARY KEY,
+                    trade_date      DATE          NOT NULL,
+                    predictor_name  VARCHAR(40)   NOT NULL,
+                    pred_direction  VARCHAR(10)   NOT NULL,
+                    pred_gap_pct    DECIMAL(6,3)  NULL,
+                    prob_up         DECIMAL(5,4)  NULL,
+                    prob_flat       DECIMAL(5,4)  NULL,
+                    prob_down       DECIMAL(5,4)  NULL,
+                    created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_pp_date_predictor (trade_date, predictor_name),
+                    INDEX idx_pp_predictor (predictor_name),
+                    INDEX idx_pp_date (trade_date)
+                )
+            """))
+    except Exception as exc:
+        logger.warning(f"[migration] ensure_predictor_predictions_table failed: {exc}")
+
+
+def get_predictor_leaderboard(days: int = 60) -> list[dict]:
+    """Per-predictor hit_rate + Brier + n over the last N days.
+
+    Joins predictor_predictions to market_actuals on trade_date, derives the
+    actual direction with the same ±0.3% band the rest of the system uses
+    (get_recent_accuracy_context), and aggregates. Returns rows sorted by
+    hit_rate desc. Empty list on error / no matched data."""
+    try:
+        with _engine().connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT p.predictor_name,
+                           COUNT(*) AS n,
+                           AVG(
+                             CASE
+                               WHEN (p.pred_direction = 'up'   AND a.actual_gap_pct >  0.3)
+                                 OR (p.pred_direction = 'down' AND a.actual_gap_pct < -0.3)
+                                 OR (p.pred_direction = 'flat' AND ABS(a.actual_gap_pct) <= 0.3)
+                               THEN 1.0 ELSE 0.0
+                             END
+                           ) AS hit_rate,
+                           AVG(
+                             POW(p.prob_up   - (CASE WHEN a.actual_gap_pct >  0.3 THEN 1 ELSE 0 END), 2) +
+                             POW(p.prob_flat - (CASE WHEN ABS(a.actual_gap_pct) <= 0.3 THEN 1 ELSE 0 END), 2) +
+                             POW(p.prob_down - (CASE WHEN a.actual_gap_pct < -0.3 THEN 1 ELSE 0 END), 2)
+                           ) AS brier
+                    FROM predictor_predictions p
+                    JOIN market_actuals a ON p.trade_date = a.trade_date
+                    WHERE p.trade_date >= CURDATE() - INTERVAL :days DAY
+                      AND a.actual_gap_pct IS NOT NULL
+                      AND p.prob_up IS NOT NULL
+                    GROUP BY p.predictor_name
+                    ORDER BY hit_rate DESC
+                """),
+                {"days": days},
+            ).fetchall()
+        return [
+            {"predictor_name": r[0], "n": int(r[1]),
+             "hit_rate": float(r[2]) if r[2] is not None else 0.0,
+             "brier": float(r[3]) if r[3] is not None else None}
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.warning(f"[dashboard] get_predictor_leaderboard failed: {exc}")
+        return []
 
 
 def get_promoted_within_days(days: int = 7) -> list[dict]:

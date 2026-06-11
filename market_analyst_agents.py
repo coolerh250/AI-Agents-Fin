@@ -1104,6 +1104,7 @@ def save_to_db_node(state: WorkflowState) -> dict:
                 ndx_chg_pct=raw.get("ndx_chg_pct"),
                 sox_chg_pct=raw.get("sox_chg_pct"),
                 tsm_adr_chg_pct=raw.get("tsm_adr_chg_pct"),
+                night_futures_chg_pct=raw.get("night_futures_chg_pct"),
                 divergence_signal=chip_div,
             )
         except Exception as exc:

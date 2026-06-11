@@ -33,6 +33,7 @@ from database_tools import (
     get_flywheel_stats,
     get_per_run_cost_summary,
     get_portfolio,
+    get_predictor_leaderboard,
     get_recent_accuracy,
     get_recent_audit_log,
     get_recent_events,
@@ -211,6 +212,54 @@ with tab_accuracy:
             }),
             use_container_width=True,
         )
+
+        # ── Predictor scoreboard (Prediction Step 1) ─────────────────────────
+        st.divider()
+        st.subheader("🏁 預測器記分板")
+        st.caption("同一份每日特徵餵給 4 個預測器，用相同 ±0.3% 門檻評分。"
+                   "核心問題：LLM 有沒有贏過笨規則與它自己的算術？")
+        board = get_predictor_leaderboard(60)
+        if not board:
+            st.info("尚無記分板資料 — 在 host 跑 "
+                    "`uv run python scripts/predictor_scoreboard.py backfill`")
+        else:
+            _name_zh = {
+                "llm_tech_analyst":       "🤖 LLM tech_analyst",
+                "weighted_rule":          "⚙️ 加權規則（LLM 的算術）",
+                "naive_nightfutures":     "🌙 夜盤符號（笨基準）",
+                "unconditional_majority": "🎲 多數類（虛無假設）",
+            }
+            base = next((r for r in board
+                         if r["predictor_name"] == "unconditional_majority"), None)
+            base_hr = base["hit_rate"] if base else None
+            board_df = pd.DataFrame([
+                {
+                    "預測器":   _name_zh.get(r["predictor_name"], r["predictor_name"]),
+                    "樣本":     r["n"],
+                    "命中率":   f"{r['hit_rate'] * 100:.1f}%",
+                    "Δ vs 虛無": (f"{(r['hit_rate'] - base_hr) * 100:+.1f}pp"
+                                if base_hr is not None else "—"),
+                    "Brier":    f"{r['brier']:.4f}" if r["brier"] is not None else "—",
+                }
+                for r in board
+            ])
+            st.dataframe(board_df, use_container_width=True, hide_index=True)
+            llm = next((r for r in board
+                        if r["predictor_name"] == "llm_tech_analyst"), None)
+            wr  = next((r for r in board
+                        if r["predictor_name"] == "weighted_rule"), None)
+            if llm and wr:
+                edge = (llm["hit_rate"] - wr["hit_rate"]) * 100
+                if edge > 2:
+                    st.success(f"✅ LLM 領先自己的加權規則 {edge:+.1f}pp — 優化 chief 有意義。")
+                elif edge < -2:
+                    st.error(f"⚠️ LLM 落後自己的加權規則 {edge:+.1f}pp — LLM 在減損，"
+                             f"下一步該換量化層而非優化 chief。")
+                else:
+                    st.warning(f"➖ LLM 與加權規則打平（{edge:+.1f}pp）— LLM 對方向預測"
+                               f"沒有加值，方向二的結論成立。")
+            st.caption("Brier 越低越校準。Δ vs 虛無＝相對「永遠猜最常見方向」的命中率優勢。"
+                       "歷史回放未含夜盤特徵，naive/weighted_rule 略受限（保守、偏袒 LLM）。")
 
         # ── Manual actual data entry ──────────────────────────────────────────
         with st.expander("✏️ 手動輸入今日實際走勢"):
