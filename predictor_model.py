@@ -95,12 +95,37 @@ def _report() -> int:
         print("[model] not enough data for walk-forward")
         return 1
     hit = wf["correct"].mean() * 100
-    # null baseline = always predict the most common actual over the WF window
-    maj = wf["actual"].value_counts(normalize=True).iloc[0] * 100
-    print(f"\n=== Walk-forward OOS (expanding window, n={len(wf)}) ===")
-    print(f"  logistic hit rate : {hit:.1f}%")
-    print(f"  majority baseline : {maj:.1f}%  (always-most-common)")
-    print(f"  edge vs majority  : {hit - maj:+.1f}pp")
+
+    # Apples-to-apples: score the Step-1 rule predictors over the SAME deep
+    # history (stateless functions of each day's features), so we can tell
+    # "fitting is weak" apart from "the recent 15-day window was easy".
+    import predictors as _P
+    wf_dates = set(pd.Timestamp(d) for d in wf["date"])
+    rule_hits = naive_hits = maj_hits = total = 0
+    trailing: list[str] = []
+    for i in range(len(dates)):
+        d = dates[i]
+        actual = y.iloc[i]
+        if pd.Timestamp(d) in wf_dates:
+            feat = X.iloc[i].to_dict()
+            if _P.predict_weighted_rule(feat)[0] == actual:
+                rule_hits += 1
+            if _P.predict_naive_nightfutures(feat)[0] == actual:
+                naive_hits += 1
+            if _P.predict_unconditional_majority(trailing[-60:])[0] == actual:
+                maj_hits += 1
+            total += 1
+        trailing.append(actual)
+    rule = rule_hits / total * 100 if total else 0
+    naive = naive_hits / total * 100 if total else 0
+    maj = maj_hits / total * 100 if total else 0
+
+    print(f"\n=== Deep-history walk-forward OOS (n={len(wf)}, same dates) ===")
+    print(f"  logistic_l2            : {hit:.1f}%")
+    print(f"  weighted_rule          : {rule:.1f}%")
+    print(f"  naive_nightfutures     : {naive:.1f}%")
+    print(f"  unconditional_majority : {maj:.1f}%  (null)")
+    print(f"  logistic edge vs null  : {hit - maj:+.1f}pp")
 
     # coefficients from a full-history fit (interpretability)
     model = LogisticPredictor().fit(X, y)
