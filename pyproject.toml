@@ -24,6 +24,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "click>=8.1",
+    "scikit-learn>=1.5",
 ]
 
 [dependency-groups]

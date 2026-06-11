@@ -108,6 +108,48 @@ def _predictions_for_day(feat: dict, trailing_actuals: list[str],
 
 # ── Commands ───────────────────────────────────────────────────────────────────
 
+def _write_logistic(target_dates: list[date]) -> int:
+    """Train + predict the logistic_l2 quant model for each target date,
+    walk-forward (train strictly on history before each date), and upsert.
+
+    Self-contained on yfinance (predictor_model / market_features) — does NOT
+    read session_episodes. Non-fatal: any failure (missing sklearn, yfinance
+    down) logs and returns 0 so the rest of the scoreboard still works."""
+    try:
+        import pandas as pd
+        from market_features import build_dataset
+        from predictor_model import LogisticPredictor, _MIN_TRAIN
+    except Exception as exc:
+        logger.warning(f"[scoreboard] logistic deps unavailable ({exc}) — skip")
+        return 0
+    try:
+        X, y, dates = build_dataset(years=2)
+    except Exception as exc:
+        logger.warning(f"[scoreboard] build_dataset failed ({exc}) — skip logistic")
+        return 0
+
+    from database_tools import _engine
+    dates_norm = pd.DatetimeIndex(dates)
+    preds = []
+    for d in sorted(set(target_dates)):
+        ts = pd.Timestamp(d)
+        if ts not in dates_norm:
+            continue                      # date not in yfinance ^TWII coverage
+        prior = (dates_norm < ts).to_numpy() if hasattr(dates_norm < ts, "to_numpy") \
+            else (dates_norm < ts)
+        if int(prior.sum()) < _MIN_TRAIN:
+            continue                      # not enough strictly-prior training rows
+        model = LogisticPredictor().fit(X[prior], y[prior])
+        xrow = X.loc[ts]
+        preds.append((d, model.predict_direction(xrow), model.predict_proba(xrow)))
+    if not preds:
+        return 0
+    with _engine().begin() as conn:
+        for d, direction, probs in preds:
+            _upsert_prediction(conn, d, "logistic_l2", direction, None, probs)
+    return len(preds)
+
+
 def cmd_backfill() -> int:
     """Replay all history. Walk-forward: each day's majority uses only the
     trailing actuals strictly before it."""
@@ -135,8 +177,9 @@ def cmd_backfill() -> int:
             if ep["actual_direction"]:
                 trailing.append(ep["actual_direction"])
 
-    logger.success(f"[scoreboard] backfill wrote {written} predictions "
-                   f"over {len(episodes)} trading days")
+    lg = _write_logistic([ep["trade_date"] for ep in episodes])
+    logger.success(f"[scoreboard] backfill wrote {written} rule predictions "
+                   f"+ {lg} logistic_l2 over {len(episodes)} trading days")
     return 0
 
 
@@ -171,7 +214,9 @@ def cmd_append(day: date) -> int:
         ):
             _upsert_prediction(conn, day, name, direction, gap, probs)
             n += 1
-    logger.success(f"[scoreboard] appended {n} predictions for {day}")
+    lg = _write_logistic([day])
+    logger.success(f"[scoreboard] appended {n} rule predictions "
+                   f"(+{lg} logistic_l2) for {day}")
     return 0
 
 

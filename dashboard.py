@@ -224,6 +224,7 @@ with tab_accuracy:
                     "`uv run python scripts/predictor_scoreboard.py backfill`")
         else:
             _name_zh = {
+                "logistic_l2":            "📐 量化模型（logistic）",
                 "llm_tech_analyst":       "🤖 LLM tech_analyst",
                 "weighted_rule":          "⚙️ 加權規則（LLM 的算術）",
                 "naive_nightfutures":     "🌙 夜盤符號（笨基準）",
